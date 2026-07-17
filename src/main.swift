@@ -1007,13 +1007,24 @@ class ScreenshotManager: NSObject {
             // that produce single symbols like *, #, @, etc.
             if conf < 0.3 { continue }
 
-            // Detect single-symbol "junk" that is likely an emoji misread:
-            // - single character (not CJK)
-            // - confidence is low-ish (0.3–0.5)
-            // - the observation box is roughly square (emoji tend to be square)
-            let isSquareish = w > 0 && h > 0 && (min(w, h) / max(w, h)) > 0.6
-            let isSingleNonCJK = candidateText.count == 1 && !candidateText.unicodeScalars.contains { $0.value >= 0x4E00 && $0.value <= 0x9FFF }
-            if isSquareish && isSingleNonCJK && conf < 0.5 { continue }
+           // Detect single-symbol "junk" that is likely an emoji misread:
+            // Vision 无法可靠识别 emoji，常将其误读为单个符号（* # @ ※ ★ ● ■ 等）。
+            // 启发式：方形选框（emoji 近正方形，真实标点通常窄）+ 符号类字符
+            // （排除字母/数字/汉字）+ 置信度非极高 → 判定为 emoji 误读并丢弃。
+            let isSquareish = w > 0 && h > 0 && (min(w, h) / max(w, h)) > 0.55
+            func isSymbolJunk(_ s: String) -> Bool {
+                // emoji 误读通常是 1~2 个符号字符
+                guard s.count <= 2 else { return false }
+                return s.unicodeScalars.allSatisfy { scalar in
+                    let v = scalar.value
+                    if v >= 0x4E00 && v <= 0x9FFF { return false }   // 汉字保留
+                    if scalar >= "a" && scalar <= "z" { return false }  // 字母保留
+                    if scalar >= "A" && scalar <= "Z" { return false }
+                    if scalar >= "0" && scalar <= "9" { return false }  // 数字保留
+                    return true  // 其余符号视为可疑
+                }
+            }
+            if isSquareish && isSymbolJunk(candidateText) && conf < 0.85 { continue }
 
             // Try to append to current line if Y is close
             if let lastIdx = lines.indices.last {
