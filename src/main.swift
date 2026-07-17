@@ -122,9 +122,10 @@ class HistoryManager {
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var hotkeyManager: HotkeyManager!
-    private var screenshotManager: ScreenshotManager!
+    var screenshotManager: ScreenshotManager!
     private var loginItem: NSMenuItem!
     private var settingsController: SettingsWindowController?
+    private var historySearchController: HistorySearchWindowController?
     private var historyMenu: NSMenuItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -176,6 +177,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let submenu = NSMenu()
         let items = HistoryManager.shared.load()
 
+        // 搜索入口（始终置顶）
+        let searchItem = submenu.addItem(withTitle: "🔍 搜索历史记录…", action: #selector(openHistorySearch), keyEquivalent: "")
+        searchItem.target = self
+
         if items.isEmpty {
             submenu.addItem(withTitle: "（暂无记录）", action: nil, keyEquivalent: "")
         } else {
@@ -224,6 +229,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    @objc func openHistorySearch() {
+        if historySearchController == nil { historySearchController = HistorySearchWindowController() }
+        (historySearchController?.contentViewController as? HistorySearchViewController)?.refresh()
+        historySearchController?.showWindow(self)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     @objc func toggleLaunchAtLogin() {
         let service = SMAppService.mainApp
         if loginItem.state == .on {
@@ -247,6 +259,191 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 // MARK: - Settings Window
+
+// MARK: - History Search Window
+
+class HistorySearchWindowController: NSWindowController {
+    convenience init() {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 440),
+                              styleMask: [.titled, .closable, .resizable, .miniaturizable],
+                              backing: .buffered, defer: false)
+        window.title = "搜索历史记录"
+        window.isReleasedWhenClosed = false
+        window.center()
+        let vc = HistorySearchViewController()
+        window.contentViewController = vc
+        self.init(window: window)
+    }
+}
+
+class HistorySearchViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
+    private var searchField: NSSearchField!
+    private var tableView: NSTableView!
+    private var scrollView: NSScrollView!
+    private var emptyLabel: NSTextField!
+    private var filteredItems: [HistoryManager.Item] = []
+    private var keyMonitor: Any?
+
+    override func loadView() {
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 440))
+
+        searchField = NSSearchField(frame: NSRect(x: 16, y: 400, width: 528, height: 26))
+        searchField.placeholderString = "输入关键词搜索…"
+        searchField.delegate = self
+        searchField.focusRingType = .none
+        view.addSubview(searchField)
+
+        tableView = NSTableView()
+        tableView.dataSource = self
+        tableView.delegate = self
+        tableView.headerView = nil
+        tableView.doubleAction = #selector(copySelected)
+        tableView.target = self
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("text"))
+        column.resizingMask = .autoresizingMask
+        tableView.addTableColumn(column)
+
+        scrollView = NSScrollView()
+        scrollView.documentView = tableView
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = false
+        view.addSubview(scrollView)
+
+        emptyLabel = NSTextField(labelWithString: "暂无历史记录")
+        emptyLabel.alignment = .center
+        emptyLabel.textColor = .secondaryLabelColor
+        emptyLabel.font = .systemFont(ofSize: 13)
+        emptyLabel.isHidden = true
+        view.addSubview(emptyLabel)
+
+        // 用 AutoLayout 约束，窗口缩放时自适应
+        [searchField, scrollView, emptyLabel].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
+        NSLayoutConstraint.activate([
+            searchField.topAnchor.constraint(equalTo: view.topAnchor, constant: 14),
+            searchField.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            searchField.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            searchField.heightAnchor.constraint(equalToConstant: 26),
+            scrollView.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 10),
+            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            emptyLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
+            emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
+        ])
+
+        self.view = view
+    }
+
+    func refresh() {
+        if searchField != nil { searchField.stringValue = "" }
+        applyFilter("")
+        // 延迟聚焦，确保窗口已显示
+        DispatchQueue.main.async { [weak self] in
+            self?.view.window?.makeFirstResponder(self?.searchField)
+        }
+        // 监听回车键：复制选中行（NSTableView 默认不响应 Return）
+        if keyMonitor == nil {
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self = self else { return event }
+                if event.keyCode == 36 {  // Return
+                    if self.searchField?.currentEditor() == nil,
+                       self.tableView.selectedRow >= 0 {
+                        self.copySelected()
+                        return nil
+                    }
+                }
+                return event
+            }
+        }
+    }
+
+    // 搜索框输入实时过滤
+    func controlTextDidChange(_ obj: Notification) {
+        applyFilter(searchField.stringValue)
+    }
+
+    private func applyFilter(_ keyword: String) {
+        let all = HistoryManager.shared.load()
+        let k = keyword.trimmingCharacters(in: .whitespaces).lowercased()
+        if k.isEmpty {
+            filteredItems = all
+        } else {
+            filteredItems = all.filter { $0.text.lowercased().contains(k) }
+        }
+        tableView.reloadData()
+        if !filteredItems.isEmpty {
+            tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+            tableView.scrollRowToVisible(0)
+        }
+        emptyLabel.stringValue = filteredItems.isEmpty ? (all.isEmpty ? "暂无历史记录" : "无匹配结果") : ""
+        emptyLabel.isHidden = !filteredItems.isEmpty
+    }
+
+    // MARK: TableView DataSource
+
+    func numberOfRows(in tableView: NSTableView) -> Int { filteredItems.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard row < filteredItems.count else { return nil }
+        let item = filteredItems[row]
+        let cell = tableView.makeView(withIdentifier: NSUserInterfaceItemIdentifier("HistCell"), owner: self) as? NSTableCellView
+            ?? NSTableCellView()
+        cell.identifier = NSUserInterfaceItemIdentifier("HistCell")
+
+        let preview = item.text.replacingOccurrences(of: "\n", with: " ⏎ ")
+        let title = preview.count > 80 ? String(preview.prefix(80)) + "…" : preview
+        let timeStr = Self.timeFormatter.string(from: item.timestamp)
+        cell.textField = cell.textField ?? {
+            let tf = NSTextField(labelWithString: "")
+            tf.font = .systemFont(ofSize: 13)
+            tf.lineBreakMode = .byTruncatingTail
+            tf.maximumNumberOfLines = 2
+            cell.textField = tf
+            return tf
+        }()
+        // 时间标记灰色后缀
+        let attr = NSMutableAttributedString(string: title, attributes: [
+            .font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.labelColor,
+        ])
+        attr.append(NSAttributedString(string: "  \(timeStr)", attributes: [
+            .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.tertiaryLabelColor,
+        ]))
+        cell.textField?.attributedStringValue = attr
+        cell.toolTip = item.text
+        return cell
+    }
+
+    func tableView(_ tableView: NSTableView, rowHeightForRow row: Int) -> CGFloat { 40 }
+
+    // MARK: 键盘交互
+
+    @objc private func copySelected() {
+        let row = tableView.clickedRow >= 0 ? tableView.clickedRow : tableView.selectedRow
+        guard row >= 0, row < filteredItems.count else { return }
+        let text = filteredItems[row].text
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        (NSApp.delegate as? AppDelegate)?.screenshotManager.playFeedback()
+        view.window?.close()
+    }
+
+    // Esc 关闭窗口
+    override func cancelOperation(_ sender: Any?) {
+        view.window?.close()
+    }
+
+    override func viewDidDisappear() {
+        super.viewDidDisappear()
+        if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MM-dd HH:mm"
+        return f
+    }()
+}
 
 class SettingsWindowController: NSWindowController {
     convenience init() {
