@@ -1,4 +1,5 @@
 import Cocoa
+import ApplicationServices
 import Vision
 import Carbon.HIToolbox
 import ServiceManagement
@@ -15,8 +16,8 @@ struct AppSettings {
     var borderWidth: CGFloat
 
     static let `default` = AppSettings(
-        keyCode: UInt32(kVK_ANSI_2),
-        modifiers: UInt(NSEvent.ModifierFlags([.command, .shift]).rawValue),
+        keyCode: UInt32(31),  // kVK_ANSI_O
+        modifiers: UInt(NSEvent.ModifierFlags([.command, .control]).rawValue),
         soundEnabled: true,
         notificationEnabled: true,
         borderWidth: 2
@@ -127,9 +128,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var historyMenu: NSMenuItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Prompt for Accessibility permission (needed for global key monitoring)
+        let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true]
+        let trusted = AXIsProcessTrustedWithOptions(options)
+        NSLog("🔑 AXIsProcessTrusted: \(trusted)")
+        
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "doc.text.magnifyingglass", accessibilityDescription: "截图OCR复制")
+            button.target = self
+            button.action = #selector(statusItemClicked)
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
 
         screenshotManager = ScreenshotManager()
@@ -184,6 +193,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func triggerScreenshot() { screenshotManager.startCapture() }
+
+    @objc func statusItemClicked() {
+        let event = NSApp.currentEvent
+        if event?.type == .rightMouseUp || event?.modifierFlags.contains(.option) == true {
+            statusItem.menu = nil
+            rebuildMenu()
+            statusItem.button?.performClick(nil)
+        } else {
+            screenshotManager.startCapture()
+        }
+    }
 
     @objc func copyHistoryItem(_ sender: NSMenuItem) {
         if let text = HistoryManager.shared.text(at: sender.tag) {
@@ -433,10 +453,17 @@ class HotkeyManager {
     private static var shared: HotkeyManager?
     private static let hotkeyId = EventHotKeyID(signature: OSType(0x4F435252), id: 1)
     private var eventHandler: EventHandlerRef?
+    private var currentKeyCode: UInt32 = 0
+    private var currentModifiers: NSEvent.ModifierFlags = []
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
 
     func applyConfig(_ settings: AppSettings) {
         if let ref = hotkeyRef { UnregisterEventHotKey(ref); hotkeyRef = nil }
-        registerHotkey(keyCode: settings.keyCode, modifiers: NSEvent.ModifierFlags(rawValue: settings.modifiers))
+        currentKeyCode = settings.keyCode
+        currentModifiers = NSEvent.ModifierFlags(rawValue: settings.modifiers)
+        registerHotkey(keyCode: settings.keyCode, modifiers: currentModifiers)
+        setupCGEventTap()
     }
 
     private func registerHotkey(keyCode: UInt32, modifiers: NSEvent.ModifierFlags) -> Bool {
@@ -464,11 +491,81 @@ class HotkeyManager {
         if modifiers.contains(.shift) { carbonMods |= UInt32(shiftKey) }
 
         let status = RegisterEventHotKey(keyCode, carbonMods, HotkeyManager.hotkeyId, GetApplicationEventTarget(), 0, &hotkeyRef)
+        NSLog("🔑 RegisterEventHotKey status: \(status), keyCode: \(keyCode), mods: \(carbonMods)")
         return status == noErr
     }
 
     private func onHotkeyTriggered() {
+        NSLog("🔑 Hotkey triggered via Carbon!")
         NotificationCenter.default.post(name: NSNotification.Name("HotkeyTriggered"), object: nil)
+    }
+
+    // CGEventTap: system-wide keyboard interception
+    private func setupCGEventTap() {
+        // Clean up old tap
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            if let src = runLoopSource { CFRunLoopRemoveSource(CFRunLoopGetCurrent(), src, .defaultMode) }
+            eventTap = nil
+            runLoopSource = nil
+        }
+
+        let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
+
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: { (_, type, event, userInfo) -> Unmanaged<CGEvent>? in
+                guard let userInfo = userInfo else { return Unmanaged.passRetained(event) }
+                let manager = Unmanaged<HotkeyManager>.fromOpaque(userInfo).takeUnretainedValue()
+
+                let keyCode = UInt32(event.getIntegerValueField(.keyboardEventKeycode))
+                let flags = event.flags
+
+                // Check modifier match
+                var needCmd = false, needShift = false, needOpt = false, needCtrl = false
+                if manager.currentModifiers.contains(.command) { needCmd = true }
+                if manager.currentModifiers.contains(.shift) { needShift = true }
+                if manager.currentModifiers.contains(.option) { needOpt = true }
+                if manager.currentModifiers.contains(.control) { needCtrl = true }
+
+                let hasCmd = flags.contains(.maskCommand)
+                let hasShift = flags.contains(.maskShift)
+                let hasOpt = flags.contains(.maskAlternate)
+                let hasCtrl = flags.contains(.maskControl)
+
+                if keyCode == manager.currentKeyCode && hasCmd == needCmd && hasShift == needShift && hasOpt == needOpt && hasCtrl == needCtrl {
+                    NSLog("🔑 Hotkey triggered via CGEventTap! keyCode=\(keyCode)")
+                    DispatchQueue.main.async {
+                        NotificationCenter.default.post(name: NSNotification.Name("HotkeyTriggered"), object: nil)
+                    }
+                }
+
+                return Unmanaged.passRetained(event)
+            },
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else {
+            NSLog("🔑 CGEventTap creation FAILED - need Input Monitoring permission")
+            return
+        }
+
+        let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), src, .defaultMode)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        eventTap = tap
+        runLoopSource = src
+        NSLog("🔑 CGEventTap installed successfully")
+        
+        // Start a timer to keep the tap alive
+        Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            guard let self = self, let tap = self.eventTap else { return }
+            if !CGEvent.tapIsEnabled(tap: tap) {
+                NSLog("🔑 EventTap was disabled, re-enabling...")
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+        }
     }
 }
 
@@ -478,7 +575,12 @@ class SelectionView: NSView {
     var selectionRect: NSRect = .zero
     var isSelecting = false
     var borderWidth: CGFloat = 2
-    var liveText: String? = nil  // live OCR preview text
+    var liveText: String? = nil
+    var onSelectionComplete: ((NSRect) -> Void)?
+    var onSelectionCancel: (() -> Void)?
+    var onSelectionDrag: ((NSRect) -> Void)?
+    private var startPoint: NSPoint = .zero
+    private var trackingTimer: Timer?
 
     override func draw(_ dirtyRect: NSRect) {
         // Dim background
@@ -498,38 +600,101 @@ class SelectionView: NSView {
             path.lineWidth = borderWidth
             path.stroke()
 
-            // Draw live OCR text preview if available
+            // Draw live OCR text preview if available (auto-sizing)
             if let text = liveText, !text.isEmpty {
-                let previewRect = NSRect(
-                    x: selectionRect.maxX,
-                    y: selectionRect.minY,
-                    width: 300,
-                    height: 80
-                )
-                // Adjust if preview would go off-screen right
-                var drawRect = previewRect
-                if drawRect.maxX > self.bounds.maxX {
-                    drawRect.origin.x = selectionRect.minX - 310
-                }
-
-                // Background
-                NSColor(white: 0, alpha: 0.85).setFill()
-                NSBezierPath(roundedRect: drawRect, xRadius: 6, yRadius: 6).fill()
-
-                // Text
+                let font = NSFont.systemFont(ofSize: 12)
                 let attrs: [NSAttributedString.Key: Any] = [
-                    .font: NSFont.systemFont(ofSize: 12),
+                    .font: font,
                     .foregroundColor: NSColor.white,
                 ]
-                let previewText = text.count > 100 ? String(text.prefix(100)) + "…" : text
+
+                // Truncate to 200 chars for preview
+                let previewText = text.count > 200 ? String(text.prefix(200)) + "…" : text
                 let attributed = NSAttributedString(string: previewText, attributes: attrs)
-                let textRect = drawRect.insetBy(dx: 8, dy: 6)
+
+                // Calculate text size with wrapping
+                let maxTextWidth: CGFloat = 280
+                let textContainerHeight: CGFloat = 400
+                let textStorage = NSTextStorage(attributedString: attributed)
+                let layoutManager = NSLayoutManager()
+                textStorage.addLayoutManager(layoutManager)
+                let textContainer = NSTextContainer(containerSize: NSSize(width: maxTextWidth, height: textContainerHeight))
+                textContainer.lineFragmentPadding = 0
+                layoutManager.addTextContainer(textContainer)
+                layoutManager.glyphRange(for: textContainer)
+                let usedRect = layoutManager.usedRect(for: textContainer)
+
+                let padding: CGFloat = 10
+                let boxWidth: CGFloat = 300
+                let boxHeight: CGFloat = min(usedRect.height + padding * 2, selectionRect.height, 400)
+
+                // Position: right of selection, fallback to left, fallback to inside-top
+                var boxX = selectionRect.maxX + 8
+                var boxY = selectionRect.maxY - boxHeight
+
+                if boxX + boxWidth > self.bounds.maxX {
+                    boxX = selectionRect.minX - boxWidth - 8
+                }
+                if boxX < 0 {
+                    // Not enough space on either side — show inside selection at top
+                    boxX = selectionRect.minX + 8
+                    boxY = selectionRect.maxY - boxHeight - 8
+                }
+                if boxY < 0 { boxY = selectionRect.minY }
+
+                let drawRect = NSRect(x: boxX, y: boxY, width: boxWidth, height: boxHeight)
+
+                // Background
+                NSColor(white: 0, alpha: 0.88).setFill()
+                NSBezierPath(roundedRect: drawRect, xRadius: 8, yRadius: 8).fill()
+
+                // Draw text
+                let textRect = drawRect.insetBy(dx: padding, dy: padding / 2)
                 attributed.draw(in: textRect)
             }
         }
     }
 
     override var acceptsFirstResponder: Bool { true }
+    override func resetCursorRects() {
+        addCursorRect(self.bounds, cursor: .crosshair)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        startPoint = NSEvent.mouseLocation
+        selectionRect = NSRect(origin: .zero, size: .zero)
+        isSelecting = true
+        needsDisplay = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isSelecting else { return }
+        let current = NSEvent.mouseLocation
+        let x = min(startPoint.x, current.x)
+        let y = min(startPoint.y, current.y)
+        let w = abs(current.x - startPoint.x)
+        let h = abs(current.y - startPoint.y)
+        selectionRect = NSRect(x: x, y: y, width: w, height: h)
+        needsDisplay = true
+        onSelectionDrag?(selectionRect)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard isSelecting else { return }
+        isSelecting = false
+        let rect = selectionRect
+        if rect.width > 5 && rect.height > 5 {
+            onSelectionComplete?(rect)
+        } else {
+            onSelectionCancel?()
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 { // Esc
+            onSelectionCancel?()
+        }
+    }
 }
 
 // MARK: - Keyable Panel
@@ -544,11 +709,11 @@ class KeyablePanel: NSPanel {
 class ScreenshotManager: NSObject {
     private var panel: NSPanel?
     private var selectionView: SelectionView?
-    private var startPoint: NSPoint = .zero
     private var currentRect: NSRect = .zero
-    private var isDragging = false
-    private var eventMonitor: Any?
     private var liveOCRTask: Task<Void, Never>?
+    private var isOCRRunning = false
+    private var cachedOCRText: String? = nil
+    private var cachedOCRRect: NSRect = .zero
 
     override init() {
         super.init()
@@ -557,6 +722,8 @@ class ScreenshotManager: NSObject {
 
     @objc func startCapture() {
         guard panel == nil else { return }
+        cachedOCRText = nil
+        cachedOCRRect = .zero
         guard let screen = NSScreen.main else { return }
         let frame = screen.frame
         let settings = AppSettings.load()
@@ -582,60 +749,54 @@ class ScreenshotManager: NSObject {
         p.makeKeyAndOrderFront(nil)
         selView.window?.makeFirstResponder(selView)
         NSApp.activate(ignoringOtherApps: true)
-        NSLog("📷 Panel shown, frame=\(frame), isKeyWindow=\(p.isKey)")
+        NSCursor.crosshair.push()
+        selView.window?.invalidateCursorRects(for: selView)
+        NSLog("📷 Panel shown, frame=\(frame)")
 
-        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .keyDown]) { [weak self] event in
-            self?.handleEvent(event)
-            return event
+        // Use callback-based mouse handling instead of NSEvent monitor
+        selView.onSelectionDrag = { [weak self] rect in
+            guard let self = self else { return }
+            self.currentRect = rect
+            if rect.width > 50 && rect.height > 20 {
+                self.scheduleLiveOCR()
+            }
+        }
+        selView.onSelectionComplete = { [weak self] rect in
+            guard let self = self else { return }
+            self.handleSelectionComplete(rect)
+        }
+        selView.onSelectionCancel = { [weak self] in
+            guard let self = self else { return }
+            self.cancelLiveOCR()
+            self.cleanupPanel()
         }
     }
 
-    private func handleEvent(_ event: NSEvent) {
-        guard panel != nil else { return }
-
-        NSLog("📷 EVENT: \(event.type.rawValue) at \(NSEvent.mouseLocation)")
-
-        switch event.type {
-        case .leftMouseDown:
-            startPoint = NSEvent.mouseLocation
-            currentRect = NSRect(origin: startPoint, size: .zero)
-            isDragging = true
-            selectionView?.isSelecting = true
-            selectionView?.selectionRect = currentRect
-            selectionView?.needsDisplay = true
-
-        case .leftMouseDragged:
-            guard isDragging else { return }
-            let current = NSEvent.mouseLocation
-            let x = min(startPoint.x, current.x)
-            let y = min(startPoint.y, current.y)
-            let w = abs(current.x - startPoint.x)
-            let h = abs(current.y - startPoint.y)
-            currentRect = NSRect(x: x, y: y, width: w, height: h)
-            selectionView?.selectionRect = currentRect
-            selectionView?.needsDisplay = true
-
-            // Throttled live OCR preview
-            if w > 50 && h > 20 {
-                scheduleLiveOCR()
-            }
-
-        case .leftMouseUp:
-            guard isDragging else { return }
-            isDragging = false
-            let rect = currentRect
-            cancelLiveOCR()
-            cleanupPanel()
-            if rect.width > 5 && rect.height > 5 {
+    private func handleSelectionComplete(_ rect: NSRect) {
+        let rect = currentRect
+        cancelLiveOCR()
+        cleanupPanel()
+        if rect.width > 5 && rect.height > 5 {
+            if let cached = cachedOCRText, !cached.isEmpty,
+               abs(cachedOCRRect.width - rect.width) < 5,
+               abs(cachedOCRRect.height - rect.height) < 5 {
+                NSLog("📷 Using cached OCR result")
+                liveOCRTask?.cancel()
+                liveOCRTask = nil
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    self.copyToClipboard(cached)
+                    HistoryManager.shared.add(cached)
+                    (NSApp.delegate as? AppDelegate)?.ocrCompleted()
+                    self.showResult(success: true, text: cached)
+                }
+            } else if liveOCRTask != nil {
+                NSLog("📷 OCR still running, will copy when done")
+            } else {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                     self?.captureRegion(rect)
                 }
             }
-
-        case .keyDown:
-            if event.keyCode == 53 { cancelLiveOCR(); cleanupPanel() }
-
-        default: break
         }
     }
 
@@ -649,22 +810,45 @@ class ScreenshotManager: NSObject {
 
         let rect = currentRect
 
-        // Cancel previous task
-        liveOCRTask?.cancel()
+        // Only cancel previous task if it's still in debounce wait,
+        // NOT if it's already running OCR
+        if !isOCRRunning {
+            liveOCRTask?.cancel()
+        } else {
+            return  // OCR in progress, don't start a new one
+        }
 
         liveOCRTask = Task {
             try? await Task.sleep(nanoseconds: 400_000_000) // 400ms debounce
             guard !Task.isCancelled else { return }
 
+            // Mark OCR as running — won't be cancelled by new scheduleLiveOCR
+            self.isOCRRunning = true
+
             let image = await self.quickCapture(rect)
-            guard let image = image else { return }
+            guard let image = image else { self.isOCRRunning = false; return }
 
             let text = await self.quickOCR(image)
+            self.isOCRRunning = false
             guard !Task.isCancelled, !text.isEmpty else { return }
 
             await MainActor.run {
-                self.selectionView?.liveText = text
-                self.selectionView?.needsDisplay = true
+                // Cache result for potential reuse
+                self.cachedOCRText = text
+                self.cachedOCRRect = rect
+                // Update preview if panel still open
+                if self.panel != nil, let sv = self.selectionView {
+                    sv.liveText = text
+                    sv.needsLayout = true
+                    sv.needsDisplay = true
+                } else {
+                    // Panel already closed (user released) — copy result now
+                    NSLog("📷 Late OCR result, copying now")
+                    self.copyToClipboard(text)
+                    HistoryManager.shared.add(text)
+                    (NSApp.delegate as? AppDelegate)?.ocrCompleted()
+                    self.showResult(success: true, text: text)
+                }
             }
         }
     }
@@ -675,10 +859,11 @@ class ScreenshotManager: NSObject {
     }
 
     private func cleanupPanel() {
-        if let monitor = eventMonitor { NSEvent.removeMonitor(monitor); eventMonitor = nil }
         panel?.orderOut(nil)
         panel = nil
         selectionView = nil
+        // Restore cursor
+        NSCursor.pop()
     }
 
     // MARK: - Capture
@@ -736,7 +921,7 @@ class ScreenshotManager: NSObject {
             }
             // .fast mode does NOT support Chinese — must use .accurate for zh recognition
             request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = true
+            request.usesLanguageCorrection = false
             request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
 
             let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
@@ -774,7 +959,7 @@ class ScreenshotManager: NSObject {
         }
 
         request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
+        request.usesLanguageCorrection = false
         request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
 
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
@@ -843,8 +1028,15 @@ class ScreenshotManager: NSObject {
             lines.append(Line(text: candidateText, x: x, width: w, y: y, height: h))
         }
 
-        // Now join lines: decide paragraph break vs soft wrap
+        // Smart line joining using multiple signals:
+        // 1. Large vertical gap → paragraph break
+        // 2. Line starts at far left (x near 0 or near first line's x) → new line
+        // 3. Line starts mid-way (continuation indent) → soft wrap, join
         var result: [String] = []
+
+        // Find the leftmost x (the "margin" — most lines start here)
+        let minX = lines.map { $0.x }.min() ?? 0
+
         for (i, line) in lines.enumerated() {
             if i == 0 {
                 result.append(line.text)
@@ -852,25 +1044,35 @@ class ScreenshotManager: NSObject {
             }
 
             let prev = lines[i - 1]
-            let gap = prev.y - line.y  // vertical gap between this line and previous (positive = moving down)
+            let gap = prev.y - line.y
+            let avgHeight = max((line.height + prev.height) / 2, 0.01)
 
-            // Average line height as reference
-            let avgHeight = (line.height + prev.height) / 2
+            // How far is this line's start from the left margin?
+            let indentFromMargin = line.x - minX
 
-            // If gap > 1.5x average line height → it's a paragraph break
-            if gap > avgHeight * 1.5 {
-                result.append(line.text)  // new paragraph
+            // Signal 1: Large vertical gap → definitely a paragraph break
+            let largeGap = gap > avgHeight * 1.8
+
+            // Signal 2: This line starts at/near the left margin → new line/paragraph
+            let startsAtMargin = indentFromMargin < avgHeight * 0.5
+
+            // Signal 3: Previous line is short (doesn't reach right edge) AND this line
+            // starts at margin → likely a real line break (user pressed Enter)
+            let prevRightEdge = prev.x + prev.width
+            let prevIsShort = prevRightEdge < (minX + prev.width * 1.5) && prev.width < avgHeight * 10
+
+            if largeGap {
+                // Big gap → paragraph break
+                result.append(line.text)
+            } else if startsAtMargin && prevIsShort {
+                // Previous line was short and this starts at margin → intentional line break
+                result.append(line.text)
+            } else if startsAtMargin {
+                // Starts at margin, normal gap → new line (keep newline)
+                result.append(line.text)
             } else {
-                // Soft wrap within same paragraph — join without separator
-                // But check horizontal alignment: if left edges differ a lot, it might be different content
-                let xDiff = abs(line.x - prev.x)
-                if xDiff < avgHeight * 2 {
-                    // Similar indentation → same paragraph, soft wrap
-                    result[result.count - 1] += line.text
-                } else {
-                    // Very different indentation → treat as separate line
-                    result.append(line.text)
-                }
+                // Starts mid-line → soft wrap, join without separator
+                result[result.count - 1] += line.text
             }
         }
 
@@ -945,11 +1147,16 @@ class ScreenshotManager: NSObject {
         pb.setString(text, forType: .string)
     }
 
+    private var audioPlayer: NSObject? = nil  // keep reference alive
+
     func playFeedback() {
         let settings = AppSettings.load()
-        if settings.soundEnabled {
-            // Use a clear system sound instead of NSSound.beep()
-            NSSound(contentsOfFile: "/System/Library/Sounds/Glass.aiff", byReference: true)?.play()
+        guard settings.soundEnabled else { return }
+        // Dispatch to main thread for reliable playback
+        DispatchQueue.main.async {
+            let sound = NSSound(contentsOfFile: "/System/Library/Sounds/Glass.aiff", byReference: true)
+            sound?.volume = 1.0
+            sound?.play()
         }
     }
 
@@ -977,6 +1184,20 @@ class ScreenshotManager: NSObject {
 }
 
 // MARK: - Main Entry Point
+
+// Listen for Darwin notification to trigger screenshot (cross-process, reliable)
+CFNotificationCenterAddObserver(
+    CFNotificationCenterGetDarwinNotifyCenter(),
+    nil,
+    { _, _, _, _, _ in
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: NSNotification.Name("HotkeyTriggered"), object: nil)
+        }
+    },
+    "com.local.screenshot-ocr-copy.trigger" as CFString,
+    nil,
+    .deliverImmediately
+)
 
 let app = NSApplication.shared
 let delegate = AppDelegate()
