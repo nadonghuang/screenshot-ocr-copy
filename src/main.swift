@@ -889,7 +889,9 @@ class ScreenshotManager: NSObject {
             config.showsCursor = false
 
             let filter = SCContentFilter(display: display, excludingWindows: [])
-            return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            let captured = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            // OCR 前屏蔽 emoji 实心色块，避免 Vision 把 emoji 误读成汉字/符号
+            return maskEmojiRegions(captured)
         } catch {
             NSLog("📷 quickCapture error: \(error)")
             return nil
@@ -916,7 +918,7 @@ class ScreenshotManager: NSObject {
                     continuation.resume(returning: "")
                     return
                 }
-                let text = self.cleanText(self.processObservations(observations, cgImage: cgImage))
+                let text = self.cleanText(self.processObservations(observations))
                 continuation.resume(returning: text)
             }
             // .fast mode does NOT support Chinese — must use .accurate for zh recognition
@@ -944,7 +946,7 @@ class ScreenshotManager: NSObject {
                 return
             }
 
-            let fullText = self.cleanText(self.processObservations(observations, cgImage: cgImage))
+            let fullText = self.cleanText(self.processObservations(observations))
 
             DispatchQueue.main.async {
                 if fullText.isEmpty {
@@ -969,60 +971,104 @@ class ScreenshotManager: NSObject {
         }
     }
 
+    /// 在 OCR 前屏蔽图像中的 emoji：检测「非白色的实心色块」并涂白。
+    /// 原理：Vision 无法识别 emoji，会把 emoji 与相邻文字合并成同一个 observation，
+    /// 因此按 observation 整体检测必然失效。改为在图像层面直接抹除 emoji 像素，
+    /// 让 Vision 根本看不到它。判据：emoji 是实心方块(填充率高)，
+    /// 文字是笔画(填充率低)。连通区域填充率 > 0.75 且近正方形即视为 emoji。
+    /// 可同时处理彩色和灰色(如🔲)实心 emoji；非实心 emoji(如📈图表)可能漏网。
+    private func maskEmojiRegions(_ image: CGImage) -> CGImage {
+        let w = image.width, h = image.height
+        guard w > 0, h > 0,
+              let provider = image.dataProvider,
+              let dataRef = provider.data,
+              let base = CFDataGetBytePtr(dataRef) else { return image }
+        let bpp = image.bitsPerPixel / 8
+        let bpr = image.bytesPerRow
+        let totalBytes = CFDataGetLength(dataRef)
+        guard bpp >= 3, image.bitsPerComponent == 8 else { return image }
+
+        var nonwhite = [Bool](repeating: false, count: w * h)
+        for y in 0..<h {
+            for x in 0..<w {
+                let o = y * bpr + x * bpp
+                guard o + 2 < totalBytes else { continue }
+                let r = Int(base[o]), g = Int(base[o + 1]), b = Int(base[o + 2])
+                if min(r, min(g, b)) < 225 { nonwhite[y * w + x] = true }
+            }
+        }
+
+        // 4-连通区域标记，统计每块面积与边界框
+        var label = [Int](repeating: 0, count: w * h)
+        var comps: [(px: Int, minX: Int, maxX: Int, minY: Int, maxY: Int)] = []
+        let dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        for sy in 0..<h {
+            for sx in 0..<w {
+                let si = sy * w + sx
+                guard nonwhite[si] && label[si] == 0 else { continue }
+                var queue = [(sx, sy)]
+                var head = 0
+                label[si] = comps.count + 1
+                var px = 0, minX = sx, maxX = sx, minY = sy, maxY = sy
+                while head < queue.count {
+                    let (cx, cy) = queue[head]; head += 1
+                    px += 1
+                    if cx < minX { minX = cx }
+                    if cx > maxX { maxX = cx }
+                    if cy < minY { minY = cy }
+                    if cy > maxY { maxY = cy }
+                    for (dx, dy) in dirs {
+                        let nx = cx + dx, ny = cy + dy
+                        if nx >= 0 && nx < w && ny >= 0 && ny < h {
+                            let ni = ny * w + nx
+                            if nonwhite[ni] && label[ni] == 0 {
+                                label[ni] = comps.count + 1
+                                queue.append((nx, ny))
+                            }
+                        }
+                    }
+                }
+                comps.append((px, minX, maxX, minY, maxY))
+            }
+        }
+
+        // 实心色块(emoji)判定：填充率高 + 近正方形 + 面积足够
+        var maskComps = Set<Int>()
+        for (i, c) in comps.enumerated() {
+            let bw = c.maxX - c.minX + 1
+            let bh = c.maxY - c.minY + 1
+            let fill = Double(c.px) / Double(bw * bh)
+            let asp = bw < bh ? Double(bw) / Double(bh) : Double(bh) / Double(bw)
+            if fill > 0.75 && asp > 0.4 && c.px > 200 {
+                maskComps.insert(i + 1)
+            }
+        }
+        if maskComps.isEmpty { return image }
+
+        NSLog("📷 屏蔽 \(maskComps.count) 个 emoji 区域")
+        var buf = [UInt8](repeating: 0, count: bpr * h)
+        memcpy(&buf, base, bpr * h)
+        for y in 0..<h {
+            for x in 0..<w {
+                let li = label[y * w + x]
+                if li > 0 && maskComps.contains(li) {
+                    let o = y * bpr + x * bpp
+                    buf[o] = 255; buf[o + 1] = 255; buf[o + 2] = 255
+                }
+            }
+        }
+        let cs = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(data: &buf, width: w, height: h,
+                                   bitsPerComponent: 8, bytesPerRow: bpr,
+                                   space: cs, bitmapInfo: image.bitmapInfo.rawValue),
+              let out = ctx.makeImage() else { return image }
+        return out
+    }
+
     /// Smart line-join: distinguishes paragraph breaks from soft line wraps.
     /// - Lines with large vertical gaps between them = different paragraphs → keep \n
     /// - Lines close together with similar indentation = same paragraph soft-wrap → join with no separator
-    /// 检测图像指定归一化区域是否为彩色图形（emoji）。
-    /// Vision bbox 原点在左下、归一化；CGImage 原点在左上、像素坐标。
-    /// 判据：emoji 是彩色图形，真实文字几乎都是单色（灰阶）。
-    /// 网格采样像素，统计高饱和度像素占比，>25% 即判定为彩色图形。
-    private func isColorfulRegion(_ cgImage: CGImage, bbox: CGRect) -> Bool {
-        let imgW = cgImage.width
-        let imgH = cgImage.height
-        guard imgW > 0, imgH > 0 else { return false }
-
-        // Vision 坐标(左下原点) → CGImage 像素坐标(左上原点)
-        let px = Int((bbox.origin.x * CGFloat(imgW)).rounded())
-        let py = Int(((1.0 - bbox.origin.y - bbox.height) * CGFloat(imgH)).rounded())
-        let pw = Int((bbox.width * CGFloat(imgW)).rounded())
-        let ph = Int((bbox.height * CGFloat(imgH)).rounded())
-        guard pw >= 2, ph >= 2 else { return false }
-
-        guard let provider = cgImage.dataProvider,
-              let data = provider.data,
-              let ptr = CFDataGetBytePtr(data) else { return false }
-        let bytesPerPixel = cgImage.bitsPerPixel / 8
-        let bytesPerRow = cgImage.bytesPerRow
-        guard bytesPerPixel >= 3 else { return false }
-
-        // 网格采样，最多 ~8x8 点，避免大区域过慢
-        let samplesX = min(8, pw)
-        let samplesY = min(8, ph)
-        var colorful = 0
-        var total = 0
-        for iy in 0..<samplesY {
-            for ix in 0..<samplesX {
-                let pixelX = min(imgW - 1, max(0, px + (pw * ix) / max(1, samplesX - 1)))
-                let pixelY = min(imgH - 1, max(0, py + (ph * iy) / max(1, samplesY - 1)))
-                let offset = pixelY * bytesPerRow + pixelX * bytesPerPixel
-                guard offset + 2 < CFDataGetLength(data) else { continue }
-                let r = ptr[offset], g = ptr[offset + 1], b = ptr[offset + 2]
-                let mx = Int(max(r, max(g, b)))
-                let mn = Int(min(r, min(g, b)))
-                let diff = mx - mn
-                total += 1
-                // 彩色：RGB 通道差大(非灰阶) 且 非极暗/极亮（排除黑白文字边缘）
-                if diff > 30 && mx > 40 && mn < 220 { colorful += 1 }
-            }
-        }
-        return total > 0 && colorful * 4 > total  // >25% 像素为彩色
-    }
-
     private func processObservations(_ observations: [VNRecognizedTextObservation]) -> String {
-        return processObservations(observations, cgImage: nil)
-    }
-
-    private func processObservations(_ observations: [VNRecognizedTextObservation], cgImage: CGImage?) -> String {
         guard !observations.isEmpty else { return "" }
 
         // Sort top-to-bottom, left-to-right
@@ -1056,13 +1102,6 @@ class ScreenshotManager: NSObject {
             // Skip low-confidence observations — often emoji/icon misreads
             // that produce single symbols like *, #, @, etc.
             if conf < 0.3 { continue }
-
-            // 源头拦截：检测 boundingBox 区域是否为彩色图形（emoji）。
-            // emoji 是彩色图形，真实文字几乎都是单色；Vision 无法识别 emoji，
-            // 会把它误读成汉字（口/困/图）、符号（★●※）或乱码。用像素颜色判定最可靠。
-            if let cg = cgImage, isColorfulRegion(cg, bbox: obs.boundingBox) {
-                continue
-            }
 
            // Detect single-symbol "junk" that is likely an emoji misread:
             // Vision 无法可靠识别 emoji，常将其误读为单个符号（* # @ ※ ★ ● ■ 等）。
