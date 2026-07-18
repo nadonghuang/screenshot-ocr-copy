@@ -4,6 +4,8 @@
 
 # 截图OCR复制 📸
 
+<a href="https://github.com/nadonghuang/screenshot-ocr-copy/releases/latest"><img src="https://img.shields.io/badge/⬇_下载-v1.0.0-blue?style=for-the-badge" alt="下载"></a>  <img src="https://img.shields.io/badge/平台-macOS%2026%2B-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS">  <img src="https://img.shields.io/badge/架构-Apple%20Silicon-black?style=for-the-badge" alt="Apple Silicon">  <img src="https://img.shields.io/github/stars/nadonghuang/screenshot-ocr-copy?style=for-the-badge&logo=github&label=星标" alt="星标">
+
 [简体中文](README.zh.md) | [English](README.md) | [日本語](README.ja.md)
 
 一个轻量的 macOS 菜单栏截图 OCR 工具。框选屏幕任意区域，自动识别中英文文字并复制到剪贴板。

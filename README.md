@@ -4,6 +4,8 @@
 
 # Screenshot OCR Copy 📸
 
+<a href="https://github.com/nadonghuang/screenshot-ocr-copy/releases/latest"><img src="https://img.shields.io/badge/⬇_Download-v1.0.0-blue?style=for-the-badge" alt="Download"></a>  <img src="https://img.shields.io/badge/platform-macOS%2026%2B-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS">  <img src="https://img.shields.io/badge/arch-Apple%20Silicon-black?style=for-the-badge" alt="Apple Silicon">  <img src="https://img.shields.io/github/stars/nadonghuang/screenshot-ocr-copy?style=for-the-badge&logo=github&label=Stars" alt="Stars">
+
 [简体中文](README.zh.md) | **English** | [日本語](README.ja.md)
 
 A lightweight macOS menu-bar screenshot OCR tool. Select any screen area, auto-recognize Chinese/English text, and copy to clipboard.

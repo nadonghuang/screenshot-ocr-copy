@@ -4,6 +4,8 @@
 
 # スクリーンショット OCR コピー 📸
 
+<a href="https://github.com/nadonghuang/screenshot-ocr-copy/releases/latest"><img src="https://img.shields.io/badge/⬇_ダウンロード-v1.0.0-blue?style=for-the-badge" alt="ダウンロード"></a>  <img src="https://img.shields.io/badge/対応-macOS%2026%2B-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS">  <img src="https://img.shields.io/badge/アーキ-Apple%20Silicon-black?style=for-the-badge" alt="Apple Silicon">  <img src="https://img.shields.io/github/stars/nadonghuang/screenshot-ocr-copy?style=for-the-badge&logo=github&label=Stars" alt="Stars">
+
 [简体中文](README.zh.md) | [English](README.md) | **日本語**
 
 macOS メニューバー常駐型の軽量スクリーンショット OCR ツール。画面の任意の領域を選択し、中国語/英語テキストを自動認識してクリップボードにコピーします。
