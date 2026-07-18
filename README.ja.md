@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/banner.png" alt="スクリーンショット OCR コピー" width="100%">
+<img src="assets/banner.ja.png" alt="スクリーンショット OCR コピー" width="100%">
 
 # スクリーンショット OCR コピー 📸
 

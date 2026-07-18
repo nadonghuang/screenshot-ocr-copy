@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/banner.png" alt="截图OCR复制" width="100%">
+<img src="assets/banner.zh.png" alt="截图OCR复制" width="100%">
 
 # 截图OCR复制 📸
 
