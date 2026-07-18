@@ -125,15 +125,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var screenshotManager: ScreenshotManager!
     private var loginItem: NSMenuItem!
     private var settingsController: SettingsWindowController?
-    private var historySearchController: HistorySearchWindowController?
-    private var historyMenu: NSMenuItem!
+    private var historyPanel: HistoryPanelController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Prompt for Accessibility permission (needed for global key monitoring)
+        // 提示授予辅助功能权限（全局按键监听需要）
         let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true]
         let trusted = AXIsProcessTrustedWithOptions(options)
         NSLog("🔑 AXIsProcessTrusted: \(trusted)")
-        
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "doc.text.magnifyingglass", accessibilityDescription: "截图OCR复制")
@@ -154,85 +153,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func rebuildMenu() {
         let settings = AppSettings.load()
         let menu = NSMenu()
+        menu.minimumWidth = 280
 
         menu.addItem(withTitle: "开始截图OCR  (\(settings.displayString))", action: #selector(triggerScreenshot), keyEquivalent: "")
-
         menu.addItem(NSMenuItem.separator())
 
-        historyMenu = menu.addItem(withTitle: "历史记录", action: nil, keyEquivalent: "")
-        rebuildHistorySubmenu()
+        // 历史记录 → 点击弹出独立面板（NSMenu 子菜单不支持输入法，改用 NSPanel）
+        menu.addItem(withTitle: "历史记录…", action: #selector(showHistoryPanel), keyEquivalent: "")
 
         menu.addItem(NSMenuItem.separator())
-
         loginItem = menu.addItem(withTitle: "开机自启动", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
-
         menu.addItem(withTitle: "设置...", action: #selector(openSettings), keyEquivalent: ",")
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "退出", action: #selector(quitApp), keyEquivalent: "q")
         statusItem.menu = menu
     }
 
-    private func rebuildHistorySubmenu() {
-        let submenu = NSMenu()
-        let items = HistoryManager.shared.load()
-
-        // 搜索入口（始终置顶）
-        let searchItem = submenu.addItem(withTitle: "🔍 搜索历史记录…", action: #selector(openHistorySearch), keyEquivalent: "")
-        searchItem.target = self
-
-        if items.isEmpty {
-            submenu.addItem(withTitle: "（暂无记录）", action: nil, keyEquivalent: "")
-        } else {
-            for (i, item) in items.enumerated() {
-                let preview = item.text.replacingOccurrences(of: "\n", with: " ")
-                let title = preview.count > 30 ? String(preview.prefix(30)) + "..." : preview
-                let menuItem = submenu.addItem(withTitle: title, action: #selector(copyHistoryItem(_:)), keyEquivalent: "")
-                menuItem.tag = i
-                menuItem.toolTip = item.text
-            }
-            submenu.addItem(NSMenuItem.separator())
-            submenu.addItem(withTitle: "清空历史记录", action: #selector(clearHistory), keyEquivalent: "")
-        }
-        historyMenu.submenu = submenu
-    }
-
     @objc func triggerScreenshot() { screenshotManager.startCapture() }
 
     @objc func statusItemClicked() {
-        let event = NSApp.currentEvent
-        if event?.type == .rightMouseUp || event?.modifierFlags.contains(.option) == true {
-            statusItem.menu = nil
-            rebuildMenu()
-            statusItem.button?.performClick(nil)
-        } else {
-            screenshotManager.startCapture()
-        }
+        // 左/右键均弹出菜单；截图走快捷键或菜单首项
+        rebuildMenu()
+        statusItem.button?.performClick(nil)
     }
 
-    @objc func copyHistoryItem(_ sender: NSMenuItem) {
-        if let text = HistoryManager.shared.text(at: sender.tag) {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
-            screenshotManager.playFeedback()
+    /// 点击「历史记录」：菜单关闭后弹出历史面板。
+    /// NSPanel 是真正的 key window，完整支持任意输入法（跟随系统状态）。
+    @objc func showHistoryPanel() {
+        if historyPanel == nil {
+            historyPanel = HistoryPanelController(screenshotManager: screenshotManager)
         }
-    }
-
-    @objc func clearHistory() {
-        HistoryManager.shared.clear()
-        rebuildHistorySubmenu()
+        guard let button = statusItem.button, let win = button.window else { return }
+        let rectInScreen = win.convertToScreen(button.frame)
+        historyPanel?.present(anchoredTo: rectInScreen)
     }
 
     @objc func openSettings() {
         if settingsController == nil { settingsController = SettingsWindowController() }
         settingsController?.showWindow(self)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    @objc func openHistorySearch() {
-        if historySearchController == nil { historySearchController = HistorySearchWindowController() }
-        (historySearchController?.contentViewController as? HistorySearchViewController)?.refresh()
-        historySearchController?.showWindow(self)
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -254,196 +213,344 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func ocrCompleted() {
-        rebuildHistorySubmenu()
+        // 历史面板若打开则刷新内容；否则无需处理（打开时再读取）
+        historyPanel?.refresh()
+    }
+}
+
+// MARK: - History Panel（独立窗口，支持完整输入法）
+
+/// 可成为 key window 的无边框面板（IME 正常的前提）。
+private class HistoryPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+/// 翻转坐标系容器：滚动文档顶部对齐。
+private class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+/// 历史记录面板控制器：顶部搜索框 + 时间分级列表 + 清空按钮。
+/// 面板尺寸固定，搜索时仅替换滚动区内容，避免任何跳动。
+class HistoryPanelController: NSObject, NSSearchFieldDelegate, NSWindowDelegate {
+    private weak var screenshotManager: ScreenshotManager?
+    private var panel: HistoryPanel!
+    private var searchField: NSSearchField!
+    private var docView: FlippedView!
+    private var scrollView: NSScrollView!
+    private var clearButton: NSButton!
+    private var keyword: String = ""
+    private var debounce: Timer?
+    private var escMonitor: Any?
+    private var scrollObserver: NSObjectProtocol?
+
+    private let panelWidth: CGFloat = 340
+    private let panelHeight: CGFloat = 460
+
+    init(screenshotManager: ScreenshotManager) {
+        self.screenshotManager = screenshotManager
+        super.init()
+        buildUI()
+    }
+
+    private func buildUI() {
+        let panel = HistoryPanel(contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
+                                 styleMask: [.borderless], backing: .buffered, defer: false)
+        panel.isFloatingPanel = true
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.isMovable = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.delegate = self
+        self.panel = panel
+
+        // 半透明毛玻璃容器（液态玻璃观感）
+        let blur = NSVisualEffectView()
+        blur.blendingMode = .behindWindow
+        blur.material = .popover
+        blur.state = .active
+        blur.wantsLayer = true
+        blur.layer?.cornerRadius = 14
+        blur.layer?.masksToBounds = true
+        panel.contentView = blur
+
+        // 搜索框：真正 key window 内的文本框，输入法跟随系统
+        searchField = NSSearchField()
+        searchField.placeholderString = "搜索历史记录…"
+        searchField.delegate = self
+        searchField.bezelStyle = .roundedBezel
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        blur.addSubview(searchField)
+
+        // 清空按钮
+        clearButton = NSButton(title: "清空历史记录", target: self, action: #selector(clearHistory))
+        clearButton.bezelStyle = .inline
+        clearButton.controlSize = .small
+        clearButton.font = .systemFont(ofSize: 11)
+        clearButton.translatesAutoresizingMaskIntoConstraints = false
+        blur.addSubview(clearButton)
+
+        // 滚动列表
+        scrollView = NSScrollView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        blur.addSubview(scrollView)
+
+        docView = FlippedView()
+        docView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = docView
+
+        NSLayoutConstraint.activate([
+            searchField.topAnchor.constraint(equalTo: blur.topAnchor, constant: 12),
+            searchField.leadingAnchor.constraint(equalTo: blur.leadingAnchor, constant: 12),
+            searchField.trailingAnchor.constraint(equalTo: blur.trailingAnchor, constant: -12),
+
+            clearButton.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
+            clearButton.trailingAnchor.constraint(equalTo: blur.trailingAnchor, constant: -10),
+
+            scrollView.topAnchor.constraint(equalTo: clearButton.bottomAnchor, constant: 6),
+            scrollView.leadingAnchor.constraint(equalTo: blur.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: blur.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: blur.bottomAnchor),
+
+            // 文档宽度 = 可视宽度，禁止横向滚动；高度随内容增长
+            docView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
+        ])
+
+        // 滚动时清除所有悬停高亮（修复滚动时多行同时标蓝）
+        let cv = scrollView.contentView
+        scrollObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification, object: cv, queue: .main
+        ) { [weak self] _ in
+            self?.resetAllHoverHighlights()
+        }
+    }
+
+    /// 在状态栏图标下方弹出，激活 app 使输入法正确挂载，并聚焦搜索框。
+    func present(anchoredTo rect: NSRect) {
+        var origin = rect.origin
+        origin.x = rect.midX - panelWidth / 2
+        origin.y = rect.minY - panelHeight
+        if let scr = (NSScreen.main ?? NSScreen.screens.first) {
+            let v = scr.visibleFrame
+            origin.x = max(v.minX + 6, min(origin.x, v.maxX - panelWidth - 6))
+            if origin.y < v.minY { origin.y = rect.maxY + 6 }   // 上方放不下则放下方
+        }
+        panel.setFrameOrigin(origin)
+        rebuildContent()
+        // 必须激活 app，否则输入法不会挂载到面板（导致只能输入中文）
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        panel.makeFirstResponder(searchField)
+        startEscMonitor()
+    }
+
+    func refresh() {
+        guard panel?.isVisible == true else { return }
+        rebuildContent()
+    }
+
+    private func startEscMonitor() {
+        if let m = escMonitor { NSEvent.removeMonitor(m) }
+        escMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 53 { self?.close(); return nil }   // Esc 关闭
+            return event
+        }
+    }
+
+    deinit {
+        if let o = scrollObserver { NotificationCenter.default.removeObserver(o) }
+    }
+
+    var isOpen: Bool { panel?.isVisible == true }
+
+    private func resetAllHoverHighlights() {
+        for case let row as HistoryRowView in docView.subviews {
+            row.resetHighlight()
+        }
+    }
+
+    func close() {
+        panel.orderOut(nil)
+        if let m = escMonitor { NSEvent.removeMonitor(m); escMonitor = nil }
+        keyword = ""
+        searchField.stringValue = ""
+        // 归还前台焦点给原 app
+        NSApp.deactivate()
+    }
+
+    // 失去焦点（点别处/切 app）→ 关闭
+    func windowDidResignKey(_ notification: Notification) {
+        close()
+    }
+
+    // MARK: - 搜索
+
+    func controlTextDidChange(_ obj: Notification) {
+        keyword = searchField.stringValue
+        debounce?.invalidate()
+        debounce = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: false) { [weak self] _ in
+            self?.rebuildContent()
+        }
+    }
+
+    @objc private func clearHistory() {
+        HistoryManager.shared.clear()
+        rebuildContent()
+    }
+
+    // MARK: - 内容构建（面板尺寸固定，仅替换滚动区 → 不抖动）
+
+    private func rebuildContent() {
+        for v in docView.subviews { v.removeFromSuperview() }
+        let items = HistoryManager.shared.load()
+        let kw = keyword.trimmingCharacters(in: .whitespaces).lowercased()
+        let filtered = kw.isEmpty ? items : items.filter { $0.text.lowercased().contains(kw) }
+
+        let pad: CGFloat = 12
+        var prev: NSLayoutYAxisAnchor = docView.topAnchor
+        var gap: CGFloat = 8
+
+        if filtered.isEmpty {
+            let ph = NSTextField(labelWithString: items.isEmpty ? "暂无历史记录" : "无匹配结果")
+            ph.font = .systemFont(ofSize: 13)
+            ph.textColor = .tertiaryLabelColor
+            ph.translatesAutoresizingMaskIntoConstraints = false
+            docView.addSubview(ph)
+            ph.topAnchor.constraint(equalTo: prev, constant: gap).isActive = true
+            ph.leadingAnchor.constraint(equalTo: docView.leadingAnchor, constant: pad).isActive = true
+            ph.bottomAnchor.constraint(lessThanOrEqualTo: docView.bottomAnchor, constant: -8).isActive = true
+            return
+        }
+
+        for (label, group) in groupHistoryByDate(filtered) {
+            let header = NSTextField(labelWithString: label)
+            header.font = .boldSystemFont(ofSize: 11)
+            header.textColor = .secondaryLabelColor
+            header.translatesAutoresizingMaskIntoConstraints = false
+            docView.addSubview(header)
+            header.topAnchor.constraint(equalTo: prev, constant: gap).isActive = true
+            header.leadingAnchor.constraint(equalTo: docView.leadingAnchor, constant: pad).isActive = true
+            header.trailingAnchor.constraint(equalTo: docView.trailingAnchor, constant: -pad).isActive = true
+            prev = header.bottomAnchor
+            gap = 2
+
+            for item in group {
+                let row = HistoryRowView(text: item.text)
+                row.translatesAutoresizingMaskIntoConstraints = false
+                row.onCopy = { [weak self] in self?.copyText(item.text) }
+                docView.addSubview(row)
+                row.topAnchor.constraint(equalTo: prev, constant: 1).isActive = true
+                row.leadingAnchor.constraint(equalTo: docView.leadingAnchor, constant: pad).isActive = true
+                row.trailingAnchor.constraint(equalTo: docView.trailingAnchor, constant: -pad).isActive = true
+                prev = row.bottomAnchor
+            }
+            gap = 10
+        }
+
+        // 末尾留白撑起文档高度
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        docView.addSubview(spacer)
+        spacer.topAnchor.constraint(equalTo: prev, constant: 8).isActive = true
+        spacer.leadingAnchor.constraint(equalTo: docView.leadingAnchor).isActive = true
+        spacer.trailingAnchor.constraint(equalTo: docView.trailingAnchor).isActive = true
+        spacer.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        spacer.bottomAnchor.constraint(equalTo: docView.bottomAnchor).isActive = true
+
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: 0))
+    }
+
+    private func copyText(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        screenshotManager?.showFeedback(text: text)
+        close()
+    }
+
+    // MARK: - 时间分级
+
+    private func groupHistoryByDate(_ items: [HistoryManager.Item]) -> [(String, [HistoryManager.Item])] {
+        let cal = Calendar.current
+        let now = Date()
+        var today: [HistoryManager.Item] = [], yesterday: [HistoryManager.Item] = []
+        var thisWeek: [HistoryManager.Item] = [], thisMonth: [HistoryManager.Item] = []
+        var earlier: [HistoryManager.Item] = []
+        for item in items {
+            if cal.isDateInToday(item.timestamp) { today.append(item) }
+            else if cal.isDateInYesterday(item.timestamp) { yesterday.append(item) }
+            else if let days = cal.dateComponents([.day], from: item.timestamp, to: now).day, days < 7 { thisWeek.append(item) }
+            else if cal.isDate(item.timestamp, equalTo: now, toGranularity: .month) { thisMonth.append(item) }
+            else { earlier.append(item) }
+        }
+        return [("今天", today), ("昨天", yesterday), ("本周", thisWeek), ("本月", thisMonth), ("更早", earlier)]
+            .filter { !$0.1.isEmpty }
+    }
+}
+
+/// 单条历史行：悬停高亮 + 点击复制。
+private class HistoryRowView: NSView {
+    var onCopy: (() -> Void)?
+    private var trackingArea: NSTrackingArea?
+    private let label = NSTextField(labelWithString: "")
+
+    init(text: String) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 6
+
+        let preview = text.replacingOccurrences(of: "\n", with: " ⏎ ")
+        label.stringValue = preview.count > 52 ? String(preview.prefix(52)) + "…" : preview
+        label.font = .systemFont(ofSize: 13)
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
+        label.cell?.truncatesLastVisibleLine = true
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 5),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+        ])
+
+        let click = NSClickGestureRecognizer(target: self, action: #selector(handleClick))
+        addGestureRecognizer(click)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    @objc private func handleClick() { onCopy?() }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let ta = trackingArea { removeTrackingArea(ta) }
+        let ta = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInActiveApp], owner: self, userInfo: nil)
+        addTrackingArea(ta)
+        trackingArea = ta
+    }
+    override func mouseEntered(with event: NSEvent) {
+        layer?.backgroundColor = NSColor.selectedContentBackgroundColor.withAlphaComponent(0.18).cgColor
+    }
+    override func mouseExited(with event: NSEvent) {
+        layer?.backgroundColor = NSColor.clear.cgColor
+    }
+    func resetHighlight() {
+        layer?.backgroundColor = NSColor.clear.cgColor
     }
 }
 
 // MARK: - Settings Window
 
-// MARK: - History Search Window
-
-class HistorySearchWindowController: NSWindowController {
-    convenience init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 440),
-                              styleMask: [.titled, .closable, .resizable, .miniaturizable],
-                              backing: .buffered, defer: false)
-        window.title = "搜索历史记录"
-        window.isReleasedWhenClosed = false
-        window.center()
-        let vc = HistorySearchViewController()
-        window.contentViewController = vc
-        self.init(window: window)
-    }
-}
-
-class HistorySearchViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
-    private var searchField: NSSearchField!
-    private var tableView: NSTableView!
-    private var scrollView: NSScrollView!
-    private var emptyLabel: NSTextField!
-    private var filteredItems: [HistoryManager.Item] = []
-    private var keyMonitor: Any?
-
-    override func loadView() {
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 440))
-
-        searchField = NSSearchField(frame: NSRect(x: 16, y: 400, width: 528, height: 26))
-        searchField.placeholderString = "输入关键词搜索…"
-        searchField.delegate = self
-        searchField.focusRingType = .none
-        view.addSubview(searchField)
-
-        tableView = NSTableView()
-        tableView.dataSource = self
-        tableView.delegate = self
-        tableView.headerView = nil
-        tableView.doubleAction = #selector(copySelected)
-        tableView.target = self
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("text"))
-        column.resizingMask = .autoresizingMask
-        tableView.addTableColumn(column)
-
-        scrollView = NSScrollView()
-        scrollView.documentView = tableView
-        scrollView.hasVerticalScroller = true
-        scrollView.autohidesScrollers = true
-        scrollView.drawsBackground = false
-        view.addSubview(scrollView)
-
-        emptyLabel = NSTextField(labelWithString: "暂无历史记录")
-        emptyLabel.alignment = .center
-        emptyLabel.textColor = .secondaryLabelColor
-        emptyLabel.font = .systemFont(ofSize: 13)
-        emptyLabel.isHidden = true
-        view.addSubview(emptyLabel)
-
-        // 用 AutoLayout 约束，窗口缩放时自适应
-        [searchField, scrollView, emptyLabel].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
-        NSLayoutConstraint.activate([
-            searchField.topAnchor.constraint(equalTo: view.topAnchor, constant: 14),
-            searchField.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            searchField.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            searchField.heightAnchor.constraint(equalToConstant: 26),
-            scrollView.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 10),
-            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            emptyLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
-            emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
-        ])
-
-        self.view = view
-    }
-
-    func refresh() {
-        if searchField != nil { searchField.stringValue = "" }
-        applyFilter("")
-        // 延迟聚焦，确保窗口已显示
-        DispatchQueue.main.async { [weak self] in
-            self?.view.window?.makeFirstResponder(self?.searchField)
-        }
-        // 监听回车键：复制选中行（NSTableView 默认不响应 Return）
-        if keyMonitor == nil {
-            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self = self else { return event }
-                if event.keyCode == 36 {  // Return
-                    if self.searchField?.currentEditor() == nil,
-                       self.tableView.selectedRow >= 0 {
-                        self.copySelected()
-                        return nil
-                    }
-                }
-                return event
-            }
-        }
-    }
-
-    // 搜索框输入实时过滤
-    func controlTextDidChange(_ obj: Notification) {
-        applyFilter(searchField.stringValue)
-    }
-
-    private func applyFilter(_ keyword: String) {
-        let all = HistoryManager.shared.load()
-        let k = keyword.trimmingCharacters(in: .whitespaces).lowercased()
-        if k.isEmpty {
-            filteredItems = all
-        } else {
-            filteredItems = all.filter { $0.text.lowercased().contains(k) }
-        }
-        tableView.reloadData()
-        if !filteredItems.isEmpty {
-            tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-            tableView.scrollRowToVisible(0)
-        }
-        emptyLabel.stringValue = filteredItems.isEmpty ? (all.isEmpty ? "暂无历史记录" : "无匹配结果") : ""
-        emptyLabel.isHidden = !filteredItems.isEmpty
-    }
-
-    // MARK: TableView DataSource
-
-    func numberOfRows(in tableView: NSTableView) -> Int { filteredItems.count }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard row < filteredItems.count else { return nil }
-        let item = filteredItems[row]
-        let cell = tableView.makeView(withIdentifier: NSUserInterfaceItemIdentifier("HistCell"), owner: self) as? NSTableCellView
-            ?? NSTableCellView()
-        cell.identifier = NSUserInterfaceItemIdentifier("HistCell")
-
-        let preview = item.text.replacingOccurrences(of: "\n", with: " ⏎ ")
-        let title = preview.count > 80 ? String(preview.prefix(80)) + "…" : preview
-        let timeStr = Self.timeFormatter.string(from: item.timestamp)
-        cell.textField = cell.textField ?? {
-            let tf = NSTextField(labelWithString: "")
-            tf.font = .systemFont(ofSize: 13)
-            tf.lineBreakMode = .byTruncatingTail
-            tf.maximumNumberOfLines = 2
-            cell.textField = tf
-            return tf
-        }()
-        // 时间标记灰色后缀
-        let attr = NSMutableAttributedString(string: title, attributes: [
-            .font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.labelColor,
-        ])
-        attr.append(NSAttributedString(string: "  \(timeStr)", attributes: [
-            .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.tertiaryLabelColor,
-        ]))
-        cell.textField?.attributedStringValue = attr
-        cell.toolTip = item.text
-        return cell
-    }
-
-    func tableView(_ tableView: NSTableView, rowHeightForRow row: Int) -> CGFloat { 40 }
-
-    // MARK: 键盘交互
-
-    @objc private func copySelected() {
-        let row = tableView.clickedRow >= 0 ? tableView.clickedRow : tableView.selectedRow
-        guard row >= 0, row < filteredItems.count else { return }
-        let text = filteredItems[row].text
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-        (NSApp.delegate as? AppDelegate)?.screenshotManager.playFeedback()
-        view.window?.close()
-    }
-
-    // Esc 关闭窗口
-    override func cancelOperation(_ sender: Any?) {
-        view.window?.close()
-    }
-
-    override func viewDidDisappear() {
-        super.viewDidDisappear()
-        if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
-    }
-
-    private static let timeFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "MM-dd HH:mm"
-        return f
-    }()
-}
 
 class SettingsWindowController: NSWindowController {
     convenience init() {
@@ -516,7 +623,7 @@ class SettingsViewController: NSViewController {
         section2.frame = NSRect(x: 20, y: 225, width: 200, height: 22)
         view.addSubview(section2)
 
-        soundCheckbox = NSButton(checkboxWithTitle: "成功时播放提示音", target: self, action: #selector(toggleSetting))
+        soundCheckbox = NSButton(checkboxWithTitle: "成功时显示弹窗提示", target: self, action: #selector(toggleSetting))
         soundCheckbox.state = settings.soundEnabled ? .on : .off
         soundCheckbox.frame = NSRect(x: 20, y: 195, width: 200, height: 22)
         view.addSubview(soundCheckbox)
@@ -1087,8 +1194,10 @@ class ScreenshotManager: NSObject {
 
             let filter = SCContentFilter(display: display, excludingWindows: [])
             let captured = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
-            // OCR 前屏蔽 emoji 实心色块，避免 Vision 把 emoji 误读成汉字/符号
-            return maskEmojiRegions(captured)
+            // 已禁用 maskEmojiRegions：该方案会把深色背景整体判为 emoji 涂白，
+            // 导致深色 UI（终端/代码/AI对话）截图的准确率暴跌。emoji 误读为小概率，
+            // 弃保：恢复正常准确率，emoji 偶发误读容忍之。
+            return captured
         } catch {
             NSLog("📷 quickCapture error: \(error)")
             return nil
@@ -1451,21 +1560,26 @@ class ScreenshotManager: NSObject {
         pb.setString(text, forType: .string)
     }
 
-    private var audioPlayer: NSObject? = nil  // keep reference alive
-
-    func playFeedback() {
+    /// 弹窗 + 音效双重提示。受「弹窗提示」开关控制。
+    func showFeedback(success: Bool = true, text: String = "") {
         let settings = AppSettings.load()
         guard settings.soundEnabled else { return }
-        // Dispatch to main thread for reliable playback
-        DispatchQueue.main.async {
-            let sound = NSSound(contentsOfFile: "/System/Library/Sounds/Glass.aiff", byReference: true)
-            sound?.volume = 1.0
-            sound?.play()
+        playFeedbackSound(success: success)
+        FeedbackToast.shared.show(success: success, text: text)
+    }
+
+    /// 播放音效：成功用 Hero（上扬悦耳），失败用 Basso（低沉）。比原 Glass 更有辨识度。
+    private func playFeedbackSound(success: Bool) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let path = success ? "/System/Library/Sounds/Hero.aiff" : "/System/Library/Sounds/Basso.aiff"
+            guard let sound = NSSound(contentsOfFile: path, byReference: true) else { return }
+            sound.volume = 0.75
+            sound.play()
         }
     }
 
     private func showResult(success: Bool, text: String) {
-        if success { playFeedback() }
+        showFeedback(success: success, text: text)
 
         let settings = AppSettings.load()
 
@@ -1484,6 +1598,110 @@ class ScreenshotManager: NSObject {
                 center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
             }
         }
+    }
+}
+
+// MARK: - Feedback Toast（轻量弹窗提示，替代提示音）
+
+/// 从屏幕右上角弹出的浮动卡片，显示复制/识别结果，约 2 秒后自动淡出。
+/// 无边框 NSPanel，不抢焦点、不阻塞，跨 Space 显示。
+private class FeedbackToast {
+    static let shared = FeedbackToast()
+    private var panel: NSPanel?
+    private var hideWork: DispatchWorkItem?
+
+    func show(success: Bool, text: String) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.show(success: success, text: text) }
+            return
+        }
+        hideWork?.cancel()
+        panel?.orderOut(nil)
+
+        let width: CGFloat = 300
+        let height: CGFloat = 64
+
+        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+                        styleMask: [.borderless], backing: .buffered, defer: false)
+        p.isFloatingPanel = true
+        p.hasShadow = true
+        p.hidesOnDeactivate = false
+        p.backgroundColor = .clear
+        p.isOpaque = false
+        p.isMovable = false
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        p.level = .floating
+        panel = p
+
+        let blur = NSVisualEffectView()
+        blur.blendingMode = .behindWindow
+        blur.material = .popover
+        blur.state = .active
+        blur.wantsLayer = true
+        blur.layer?.cornerRadius = 14
+        blur.layer?.masksToBounds = true
+        p.contentView = blur
+
+        let icon = NSTextField(labelWithString: success ? "✅" : "⚠️")
+        icon.font = .systemFont(ofSize: 22)
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        blur.addSubview(icon)
+
+        let title = NSTextField(labelWithString: success ? "已复制到剪贴板" : "未能识别到文字")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        title.textColor = .labelColor
+        title.translatesAutoresizingMaskIntoConstraints = false
+        blur.addSubview(title)
+
+        let preview = success ? (text.count > 60 ? String(text.prefix(60)) + "…" : text) : ""
+        let body = NSTextField(labelWithString: preview)
+        body.font = .systemFont(ofSize: 11)
+        body.textColor = .secondaryLabelColor
+        body.lineBreakMode = .byTruncatingTail
+        body.maximumNumberOfLines = 1
+        body.cell?.truncatesLastVisibleLine = true
+        body.translatesAutoresizingMaskIntoConstraints = false
+        blur.addSubview(body)
+
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: blur.leadingAnchor, constant: 14),
+            icon.centerYAnchor.constraint(equalTo: blur.centerYAnchor, constant: preview.isEmpty ? 0 : 6),
+            icon.widthAnchor.constraint(equalToConstant: 26),
+
+            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
+            title.trailingAnchor.constraint(equalTo: blur.trailingAnchor, constant: -14),
+            title.topAnchor.constraint(equalTo: blur.topAnchor, constant: preview.isEmpty ? 22 : 12),
+
+            body.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            body.trailingAnchor.constraint(equalTo: title.trailingAnchor),
+            body.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2),
+        ])
+
+        // 定位：主屏右上角（菜单栏下方）
+        if let screen = (NSScreen.main ?? NSScreen.screens.first) {
+            let vf = screen.visibleFrame
+            p.setFrameOrigin(NSPoint(x: vf.maxX - width - 16, y: vf.maxY - height - 8))
+        }
+
+        p.alphaValue = 0
+        p.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.18
+            p.animator().alphaValue = 1
+        }
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, let cur = self.panel, cur === p else { return }
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.25
+                cur.animator().alphaValue = 0
+            }, completionHandler: {
+                cur.orderOut(nil)
+                if self.panel === cur { self.panel = nil }
+            })
+        }
+        hideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2, execute: work)
     }
 }
 
