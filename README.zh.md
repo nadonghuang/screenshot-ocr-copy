@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/banner.png" alt="截图OCR复制" width="100%">
+
 # 截图OCR复制 📸
 
 [简体中文](README.zh.md) | [English](README.md) | [日本語](README.ja.md)

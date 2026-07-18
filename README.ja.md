@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/banner.png" alt="スクリーンショット OCR コピー" width="100%">
+
 # スクリーンショット OCR コピー 📸
 
 [简体中文](README.zh.md) | [English](README.md) | **日本語**
