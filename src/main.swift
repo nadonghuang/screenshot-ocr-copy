@@ -68,16 +68,155 @@ struct AppSettings {
             UInt32(kVK_ANSI_0): "0", UInt32(kVK_ANSI_1): "1", UInt32(kVK_ANSI_2): "2",
             UInt32(kVK_ANSI_3): "3", UInt32(kVK_ANSI_4): "4", UInt32(kVK_ANSI_5): "5",
             UInt32(kVK_ANSI_6): "6", UInt32(kVK_ANSI_7): "7", UInt32(kVK_ANSI_8): "8",
-            UInt32(kVK_ANSI_9): "9", UInt32(kVK_Space): "空格", UInt32(kVK_Return): "回车",
+            UInt32(kVK_ANSI_9): "9", UInt32(kVK_Space): L("key.space"), UInt32(kVK_Return): L("key.return"),
             UInt32(kVK_Tab): "Tab", UInt32(kVK_F1): "F1", UInt32(kVK_F2): "F2",
             UInt32(kVK_F3): "F3", UInt32(kVK_F4): "F4", UInt32(kVK_F5): "F5",
             UInt32(kVK_F6): "F6", UInt32(kVK_F7): "F7", UInt32(kVK_F8): "F8",
             UInt32(kVK_F9): "F9", UInt32(kVK_F10): "F10", UInt32(kVK_F11): "F11",
             UInt32(kVK_F12): "F12",
         ]
-        return m[code] ?? "键\(code)"
+        return m[code] ?? String(format: L("key.keyN"), code)
     }
 }
+
+// MARK: - L10n（国际化：中英双语，默认英文，可切换）
+
+/// 语言枚举：英文 / 简体中文。持久化到 UserDefaults。
+enum AppLanguage: String, CaseIterable {
+    case english = "English"
+    case chinese = "简体中文"
+
+    var code: String { self == .english ? "en" : "zh-Hans" }
+}
+
+/// 本地化字符串中心：根据当前语言返回对应文案。
+/// 用 key 查表，避免分散的 NSLocalizedString + .strings 文件，单文件自包含。
+final class L10n {
+    static let shared = L10n()
+    private static let storageKey = "appLanguage"
+
+    /// 当前语言，变更时通知 UI 刷新。
+    static var language: AppLanguage {
+        get {
+            let raw = UserDefaults.standard.string(forKey: storageKey) ?? AppLanguage.english.rawValue
+            return AppLanguage(rawValue: raw) ?? .english
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: storageKey)
+            NotificationCenter.default.post(name: .languageDidChange, object: nil)
+        }
+    }
+
+    private init() {}
+
+    /// 按当前语言取文案。找不到 key 时回退英文，再回退 key 本身。
+    func t(_ key: String) -> String {
+        let lang = L10n.language
+        let table = L10n.tables[lang] ?? [:]
+        return table[key] ?? (L10n.tables[.english]?[key] ?? key)
+    }
+
+    // 中英文案表。新增界面文案时在此添加对应 key。
+    private static let tables: [AppLanguage: [String: String]] = [
+        .english: [
+            // 菜单栏
+            "menu.capture": "Start Screenshot OCR  (%@)",
+            "menu.history": "History…",
+            "menu.launchAtLogin": "Launch at Login",
+            "menu.settings": "Settings…",
+            "menu.quit": "Quit",
+            // 历史面板
+            "history.searchPlaceholder": "Search history…",
+            "history.clear": "Clear History",
+            "history.empty": "No history yet",
+            "history.noMatch": "No matching results",
+            "history.today": "Today",
+            "history.yesterday": "Yesterday",
+            "history.thisWeek": "This Week",
+            "history.thisMonth": "This Month",
+            "history.earlier": "Earlier",
+            // 设置窗口
+            "settings.title": "Settings",
+            "settings.hotkey": "Hotkey",
+            "settings.record": "Record New Hotkey",
+            "settings.reset": "Reset to Default",
+            "settings.hotkeyHint": "Press a new key combination after recording (at least one modifier key). Esc to cancel.",
+            "settings.feedback": "Feedback",
+            "settings.toast": "Show toast on success",
+            "settings.notification": "Show system notifications",
+            "settings.selection": "Selection Border",
+            "settings.borderHint": "Border width:",
+            "settings.borderDesc": "Border color auto-adapts to background (black on light, white on dark)",
+            "settings.language": "Language",
+            "settings.done": "Done",
+            "settings.recording": "Press hotkey…",
+            "settings.waiting": "Waiting for input…",
+            // 提示
+            "toast.copied": "Copied to clipboard",
+            "toast.failed": "No text recognized",
+            "notif.copied": "Copied to clipboard",
+            "notif.failed": "No text recognized",
+            // 快捷键串
+            "key.space": "Space",
+            "key.return": "Return",
+            "key.keyN": "Key%d",
+            // 访问性
+            "accessibility.appName": "Screenshot OCR Copy",
+        ],
+        .chinese: [
+            // 菜单栏
+            "menu.capture": "开始截图OCR  (%@)",
+            "menu.history": "历史记录…",
+            "menu.launchAtLogin": "开机自启动",
+            "menu.settings": "设置…",
+            "menu.quit": "退出",
+            // 历史面板
+            "history.searchPlaceholder": "搜索历史记录…",
+            "history.clear": "清空历史记录",
+            "history.empty": "暂无历史记录",
+            "history.noMatch": "无匹配结果",
+            "history.today": "今天",
+            "history.yesterday": "昨天",
+            "history.thisWeek": "本周",
+            "history.thisMonth": "本月",
+            "history.earlier": "更早",
+            // 设置窗口
+            "settings.title": "设置",
+            "settings.hotkey": "快捷键",
+            "settings.record": "录制新快捷键",
+            "settings.reset": "恢复默认",
+            "settings.hotkeyHint": "录制后按下新的快捷键组合（至少含一个修饰键），按 Esc 取消",
+            "settings.feedback": "提示",
+            "settings.toast": "成功时显示弹窗提示",
+            "settings.notification": "显示系统通知",
+            "settings.selection": "截图选框",
+            "settings.borderHint": "边框粗细：",
+            "settings.borderDesc": "边框颜色根据底色自动适配（浅底用黑，深底用白）",
+            "settings.language": "语言",
+            "settings.done": "完成",
+            "settings.recording": "按下快捷键…",
+            "settings.waiting": "等待输入…",
+            // 提示
+            "toast.copied": "已复制到剪贴板",
+            "toast.failed": "未能识别到文字",
+            "notif.copied": "已复制到剪贴板",
+            "notif.failed": "未能识别到文字",
+            // 快捷键串
+            "key.space": "空格",
+            "key.return": "回车",
+            "key.keyN": "键%d",
+            // 访问性
+            "accessibility.appName": "截图OCR复制",
+        ],
+    ]
+}
+
+extension Notification.Name {
+    static let languageDidChange = Notification.Name("appLanguageDidChange")
+}
+
+/// 全局快捷取值，如 L("menu.quit")，减少样板代码。
+func L(_ key: String) -> String { L10n.shared.t(key) }
 
 // MARK: - History Manager
 
@@ -135,7 +274,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "doc.text.magnifyingglass", accessibilityDescription: "截图OCR复制")
+            button.image = NSImage(systemSymbolName: "doc.text.magnifyingglass", accessibilityDescription: L("accessibility.appName"))
             button.target = self
             button.action = #selector(statusItemClicked)
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -148,6 +287,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let settings = AppSettings.load()
         hotkeyManager.applyConfig(settings)
         NSLog("截图OCR复制 started. Hotkey: \(settings.displayString)")
+
+        // 语言切换时刷新菜单文案
+        NotificationCenter.default.addObserver(forName: .languageDidChange, object: nil, queue: .main) { [weak self] _ in
+            self?.rebuildMenu()
+        }
     }
 
     func rebuildMenu() {
@@ -155,18 +299,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.minimumWidth = 280
 
-        menu.addItem(withTitle: "开始截图OCR  (\(settings.displayString))", action: #selector(triggerScreenshot), keyEquivalent: "")
+        menu.addItem(withTitle: String(format: L("menu.capture"), settings.displayString), action: #selector(triggerScreenshot), keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
 
         // 历史记录 → 点击弹出独立面板（NSMenu 子菜单不支持输入法，改用 NSPanel）
-        menu.addItem(withTitle: "历史记录…", action: #selector(showHistoryPanel), keyEquivalent: "")
+        menu.addItem(withTitle: L("menu.history"), action: #selector(showHistoryPanel), keyEquivalent: "")
 
         menu.addItem(NSMenuItem.separator())
-        loginItem = menu.addItem(withTitle: "开机自启动", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+        loginItem = menu.addItem(withTitle: L("menu.launchAtLogin"), action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        menu.addItem(withTitle: "设置...", action: #selector(openSettings), keyEquivalent: ",")
+        menu.addItem(withTitle: L("menu.settings"), action: #selector(openSettings), keyEquivalent: ",")
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(withTitle: "退出", action: #selector(quitApp), keyEquivalent: "q")
+        menu.addItem(withTitle: L("menu.quit"), action: #selector(quitApp), keyEquivalent: "q")
         statusItem.menu = menu
     }
 
@@ -279,14 +423,14 @@ class HistoryPanelController: NSObject, NSSearchFieldDelegate, NSWindowDelegate 
 
         // 搜索框：真正 key window 内的文本框，输入法跟随系统
         searchField = NSSearchField()
-        searchField.placeholderString = "搜索历史记录…"
+        searchField.placeholderString = L("history.searchPlaceholder")
         searchField.delegate = self
         searchField.bezelStyle = .roundedBezel
         searchField.translatesAutoresizingMaskIntoConstraints = false
         blur.addSubview(searchField)
 
         // 清空按钮
-        clearButton = NSButton(title: "清空历史记录", target: self, action: #selector(clearHistory))
+        clearButton = NSButton(title: L("history.clear"), target: self, action: #selector(clearHistory))
         clearButton.bezelStyle = .inline
         clearButton.controlSize = .small
         clearButton.font = .systemFont(ofSize: 11)
@@ -420,7 +564,7 @@ class HistoryPanelController: NSObject, NSSearchFieldDelegate, NSWindowDelegate 
         var gap: CGFloat = 8
 
         if filtered.isEmpty {
-            let ph = NSTextField(labelWithString: items.isEmpty ? "暂无历史记录" : "无匹配结果")
+            let ph = NSTextField(labelWithString: items.isEmpty ? L("history.empty") : L("history.noMatch"))
             ph.font = .systemFont(ofSize: 13)
             ph.textColor = .tertiaryLabelColor
             ph.translatesAutoresizingMaskIntoConstraints = false
@@ -491,7 +635,7 @@ class HistoryPanelController: NSObject, NSSearchFieldDelegate, NSWindowDelegate 
             else if cal.isDate(item.timestamp, equalTo: now, toGranularity: .month) { thisMonth.append(item) }
             else { earlier.append(item) }
         }
-        return [("今天", today), ("昨天", yesterday), ("本周", thisWeek), ("本月", thisMonth), ("更早", earlier)]
+        return [(L("history.today"), today), (L("history.yesterday"), yesterday), (L("history.thisWeek"), thisWeek), (L("history.thisMonth"), thisMonth), (L("history.earlier"), earlier)]
             .filter { !$0.1.isEmpty }
     }
 }
@@ -554,9 +698,9 @@ private class HistoryRowView: NSView {
 
 class SettingsWindowController: NSWindowController {
     convenience init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 370),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 420),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "设置"
+        window.title = L("settings.title")
         window.isReleasedWhenClosed = false
         window.center()
         let vc = SettingsViewController()
@@ -577,15 +721,28 @@ class SettingsViewController: NSViewController {
     private var notifCheckbox: NSButton!
     private var borderSlider: NSSlider!
     private var borderLabel: NSTextField!
+    private var languagePopup: NSPopUpButton!
+    // 分区标题与动态文案控件，切换语言时需刷新
+    private var titleLabel: NSTextField!
+    private var sectionHotkey: NSTextField!
+    private var sectionLanguage: NSTextField!
+    private var sectionFeedback: NSTextField!
+    private var sectionSelection: NSTextField!
+    private var hotkeyHint: NSTextField!
+    private var borderHint: NSTextField!
+    private var borderDesc: NSTextField!
+    private var doneBtn: NSButton!
+    private var resetBtn: NSButton!
+    private var langObserver: NSObjectProtocol?
 
     override func loadView() {
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 370))
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 420))
 
         // Section: 快捷键
-        let section1 = NSTextField(labelWithString: "快捷键")
-        section1.font = NSFont.boldSystemFont(ofSize: 14)
-        section1.frame = NSRect(x: 20, y: 330, width: 200, height: 22)
-        view.addSubview(section1)
+        sectionHotkey = NSTextField(labelWithString: L("settings.hotkey"))
+        sectionHotkey.font = NSFont.boldSystemFont(ofSize: 14)
+        sectionHotkey.frame = NSRect(x: 20, y: 380, width: 200, height: 22)
+        view.addSubview(sectionHotkey)
 
         hotkeyLabel = NSTextField(labelWithString: settings.displayString)
         hotkeyLabel.font = NSFont.monospacedSystemFont(ofSize: 18, weight: .medium)
@@ -593,93 +750,138 @@ class SettingsViewController: NSViewController {
         hotkeyLabel.wantsLayer = true
         hotkeyLabel.layer?.cornerRadius = 8
         hotkeyLabel.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        hotkeyLabel.frame = NSRect(x: 20, y: 285, width: 120, height: 32)
+        hotkeyLabel.frame = NSRect(x: 20, y: 335, width: 120, height: 32)
         view.addSubview(hotkeyLabel)
 
-        recordButton = NSButton(title: "录制新快捷键", target: self, action: #selector(toggleRecording))
+        recordButton = NSButton(title: L("settings.record"), target: self, action: #selector(toggleRecording))
         recordButton.bezelStyle = .rounded
-        recordButton.frame = NSRect(x: 150, y: 285, width: 130, height: 32)
+        recordButton.frame = NSRect(x: 150, y: 335, width: 130, height: 32)
         view.addSubview(recordButton)
 
-        let resetBtn = NSButton(title: "恢复默认", target: self, action: #selector(resetToDefault))
+        resetBtn = NSButton(title: L("settings.reset"), target: self, action: #selector(resetToDefault))
         resetBtn.bezelStyle = .rounded
-        resetBtn.frame = NSRect(x: 290, y: 285, width: 100, height: 32)
+        resetBtn.frame = NSRect(x: 290, y: 335, width: 100, height: 32)
         view.addSubview(resetBtn)
 
-        let hint = NSTextField(labelWithString: "录制后按下新的快捷键组合（至少含一个修饰键），按 Esc 取消")
-        hint.font = NSFont.systemFont(ofSize: 11)
-        hint.textColor = .secondaryLabelColor
-        hint.frame = NSRect(x: 20, y: 265, width: 380, height: 16)
-        view.addSubview(hint)
+        hotkeyHint = NSTextField(labelWithString: L("settings.hotkeyHint"))
+        hotkeyHint.font = NSFont.systemFont(ofSize: 11)
+        hotkeyHint.textColor = .secondaryLabelColor
+        hotkeyHint.frame = NSRect(x: 20, y: 315, width: 380, height: 16)
+        view.addSubview(hotkeyHint)
 
-        // Separator
-        let sep1 = NSBox(frame: NSRect(x: 20, y: 250, width: 380, height: 1))
+        let sep1 = NSBox(frame: NSRect(x: 20, y: 300, width: 380, height: 1))
         sep1.boxType = .separator
         view.addSubview(sep1)
 
-        // Section: 提示
-        let section2 = NSTextField(labelWithString: "提示")
-        section2.font = NSFont.boldSystemFont(ofSize: 14)
-        section2.frame = NSRect(x: 20, y: 225, width: 200, height: 22)
-        view.addSubview(section2)
+        // Section: 语言
+        sectionLanguage = NSTextField(labelWithString: L("settings.language"))
+        sectionLanguage.font = NSFont.boldSystemFont(ofSize: 14)
+        sectionLanguage.frame = NSRect(x: 20, y: 270, width: 200, height: 22)
+        view.addSubview(sectionLanguage)
 
-        soundCheckbox = NSButton(checkboxWithTitle: "成功时显示弹窗提示", target: self, action: #selector(toggleSetting))
+        languagePopup = NSPopUpButton(frame: NSRect(x: 20, y: 238, width: 200, height: 26), pullsDown: false)
+        languagePopup.target = self
+        languagePopup.action = #selector(languageChanged)
+        for lang in AppLanguage.allCases {
+            languagePopup.addItem(withTitle: lang.rawValue)
+        }
+        languagePopup.selectItem(withTitle: L10n.language.rawValue)
+        view.addSubview(languagePopup)
+
+        let sepLang = NSBox(frame: NSRect(x: 20, y: 222, width: 380, height: 1))
+        sepLang.boxType = .separator
+        view.addSubview(sepLang)
+
+        // Section: 提示
+        sectionFeedback = NSTextField(labelWithString: L("settings.feedback"))
+        sectionFeedback.font = NSFont.boldSystemFont(ofSize: 14)
+        sectionFeedback.frame = NSRect(x: 20, y: 192, width: 200, height: 22)
+        view.addSubview(sectionFeedback)
+
+        soundCheckbox = NSButton(checkboxWithTitle: L("settings.toast"), target: self, action: #selector(toggleSetting))
         soundCheckbox.state = settings.soundEnabled ? .on : .off
-        soundCheckbox.frame = NSRect(x: 20, y: 195, width: 200, height: 22)
+        soundCheckbox.frame = NSRect(x: 20, y: 162, width: 300, height: 22)
         view.addSubview(soundCheckbox)
 
-        notifCheckbox = NSButton(checkboxWithTitle: "显示系统通知", target: self, action: #selector(toggleSetting))
+        notifCheckbox = NSButton(checkboxWithTitle: L("settings.notification"), target: self, action: #selector(toggleSetting))
         notifCheckbox.state = settings.notificationEnabled ? .on : .off
-        notifCheckbox.frame = NSRect(x: 20, y: 170, width: 200, height: 22)
+        notifCheckbox.frame = NSRect(x: 20, y: 137, width: 300, height: 22)
         view.addSubview(notifCheckbox)
 
-        // Separator
-        let sep2 = NSBox(frame: NSRect(x: 20, y: 155, width: 380, height: 1))
+        let sep2 = NSBox(frame: NSRect(x: 20, y: 122, width: 380, height: 1))
         sep2.boxType = .separator
         view.addSubview(sep2)
 
         // Section: 截图选框
-        let section3 = NSTextField(labelWithString: "截图选框")
-        section3.font = NSFont.boldSystemFont(ofSize: 14)
-        section3.frame = NSRect(x: 20, y: 130, width: 200, height: 22)
-        view.addSubview(section3)
+        sectionSelection = NSTextField(labelWithString: L("settings.selection"))
+        sectionSelection.font = NSFont.boldSystemFont(ofSize: 14)
+        sectionSelection.frame = NSRect(x: 20, y: 97, width: 200, height: 22)
+        view.addSubview(sectionSelection)
 
-        let borderHint = NSTextField(labelWithString: "边框粗细：")
+        borderHint = NSTextField(labelWithString: L("settings.borderHint"))
         borderHint.font = NSFont.systemFont(ofSize: 13)
-        borderHint.frame = NSRect(x: 20, y: 100, width: 80, height: 20)
+        borderHint.frame = NSRect(x: 20, y: 67, width: 80, height: 20)
         view.addSubview(borderHint)
 
         borderSlider = NSSlider(value: Double(settings.borderWidth), minValue: 1, maxValue: 8, target: self, action: #selector(borderChanged))
-        borderSlider.frame = NSRect(x: 100, y: 100, width: 200, height: 20)
+        borderSlider.frame = NSRect(x: 100, y: 67, width: 200, height: 20)
         view.addSubview(borderSlider)
 
         borderLabel = NSTextField(labelWithString: "\(Int(settings.borderWidth)) pt")
         borderLabel.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        borderLabel.frame = NSRect(x: 310, y: 100, width: 60, height: 20)
+        borderLabel.frame = NSRect(x: 310, y: 67, width: 60, height: 20)
         view.addSubview(borderLabel)
 
-        let borderDesc = NSTextField(labelWithString: "边框颜色根据底色自动适配（浅底用黑，深底用白）")
+        borderDesc = NSTextField(labelWithString: L("settings.borderDesc"))
         borderDesc.font = NSFont.systemFont(ofSize: 11)
         borderDesc.textColor = .secondaryLabelColor
-        borderDesc.frame = NSRect(x: 20, y: 78, width: 380, height: 16)
+        borderDesc.frame = NSRect(x: 20, y: 45, width: 380, height: 16)
         view.addSubview(borderDesc)
 
-        // Done button
-        let doneBtn = NSButton(title: "完成", target: self, action: #selector(closeWindow))
+        doneBtn = NSButton(title: L("settings.done"), target: self, action: #selector(closeWindow))
         doneBtn.bezelStyle = .rounded
         doneBtn.keyEquivalent = "\r"
         doneBtn.frame = NSRect(x: 320, y: 20, width: 80, height: 32)
         view.addSubview(doneBtn)
 
         self.view = view
+
+        // 语言切换时刷新本窗口所有文案
+        langObserver = NotificationCenter.default.addObserver(forName: .languageDidChange, object: nil, queue: .main) { [weak self] _ in
+            self?.refreshLocalizedTexts()
+        }
+    }
+
+    /// 切换语言后刷新所有控件的文案。
+    private func refreshLocalizedTexts() {
+        view.window?.title = L("settings.title")
+        sectionHotkey.stringValue = L("settings.hotkey")
+        sectionLanguage.stringValue = L("settings.language")
+        sectionFeedback.stringValue = L("settings.feedback")
+        sectionSelection.stringValue = L("settings.selection")
+        hotkeyHint.stringValue = L("settings.hotkeyHint")
+        borderHint.stringValue = L("settings.borderHint")
+        borderDesc.stringValue = L("settings.borderDesc")
+        soundCheckbox.title = L("settings.toast")
+        notifCheckbox.title = L("settings.notification")
+        doneBtn.title = L("settings.done")
+        resetBtn.title = L("settings.reset")
+        // 录制中保持录制态文案，否则恢复默认
+        recordButton.title = isRecording ? L("settings.recording") : L("settings.record")
+        if !isRecording { hotkeyLabel.stringValue = settings.displayString }
+        languagePopup.selectItem(withTitle: L10n.language.rawValue)
+    }
+
+    deinit {
+        if let o = langObserver { NotificationCenter.default.removeObserver(o) }
     }
 
     @objc func toggleRecording() {
         isRecording.toggle()
         if isRecording {
-            recordButton.title = "按下快捷键..."
+            recordButton.title = L("settings.recording")
             recordButton.highlight(true)
-            hotkeyLabel.stringValue = "等待输入..."
+            hotkeyLabel.stringValue = L("settings.waiting")
             storedMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 self?.handleKeyEvent(event)
                 return nil
@@ -715,7 +917,7 @@ class SettingsViewController: NSViewController {
 
     private func stopRecording() {
         isRecording = false
-        recordButton.title = "录制新快捷键"
+        recordButton.title = L("settings.record")
         recordButton.highlight(false)
         if let m = storedMonitor { NSEvent.removeMonitor(m); storedMonitor = nil }
         if let m = globalMonitor { NSEvent.removeMonitor(m); globalMonitor = nil }
@@ -733,6 +935,13 @@ class SettingsViewController: NSViewController {
         settings.soundEnabled = soundCheckbox.state == .on
         settings.notificationEnabled = notifCheckbox.state == .on
         settings.save()
+        (NSApp.delegate as? AppDelegate)?.settingsDidChange()
+    }
+
+    @objc func languageChanged() {
+        guard let title = languagePopup.titleOfSelectedItem,
+              let lang = AppLanguage(rawValue: title) else { return }
+        L10n.language = lang   // 触发 languageDidChange → 刷新本窗口 + AppDelegate 菜单
         (NSApp.delegate as? AppDelegate)?.settingsDidChange()
     }
 
@@ -1592,7 +1801,7 @@ class ScreenshotManager: NSObject {
                 guard status.authorizationStatus == .authorized || status.authorizationStatus == .provisional else { return }
 
                 let content = UNMutableNotificationContent()
-                content.title = success ? "已复制到剪贴板" : "未能识别到文字"
+                content.title = success ? L("notif.copied") : L("notif.failed")
                 content.body = success ? (text.count > 50 ? String(text.prefix(50)) + "..." : text) : ""
                 content.sound = nil  // we play our own sound
                 center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
@@ -1625,7 +1834,7 @@ private struct ToastContentView: View {
                 .foregroundStyle(success ? .green : .orange)
                 .frame(width: 30)
             VStack(alignment: .leading, spacing: 2) {
-                Text(success ? "已复制到剪贴板" : "未能识别到文字")
+                Text(success ? L("toast.copied") : L("toast.failed"))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.primary)
                 if !preview.isEmpty {
