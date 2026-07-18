@@ -1603,12 +1603,58 @@ class ScreenshotManager: NSObject {
 
 // MARK: - Feedback Toast（轻量弹窗提示，替代提示音）
 
-/// 从屏幕右上角弹出的浮动卡片，显示复制/识别结果，约 2 秒后自动淡出。
-/// 无边框 NSPanel，不抢焦点、不阻塞，跨 Space 显示。
+// MARK: - Feedback Toast（液态玻璃弹窗，SwiftUI glassEffect）
+
+import SwiftUI
+
+/// 弹窗内容视图：图标 + 标题 + 预览，背景用 macOS 26 原生液态玻璃 glassEffect。
+private struct ToastContentView: View {
+    let success: Bool
+    let text: String
+
+    private var preview: String {
+        guard success, !text.isEmpty else { return "" }
+        return text.count > 60 ? String(text.prefix(60)) + "…" : text
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .font(.system(size: 26, weight: .medium))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(success ? .green : .orange)
+                .frame(width: 30)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(success ? "已复制到剪贴板" : "未能识别到文字")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.primary)
+                if !preview.isEmpty {
+                    Text(preview)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(width: 320, height: 66, alignment: .leading)
+        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+    }
+}
+
+/// 从屏幕右上角滑入的浮动卡片，约 2.4 秒后滑出。
+/// 用 SwiftUI 原生液态玻璃（glassEffect），滑动时玻璃实时折射背后内容。
 private class FeedbackToast {
     static let shared = FeedbackToast()
     private var panel: NSPanel?
     private var hideWork: DispatchWorkItem?
+    private var restFrame: NSRect = .zero
+    private var offFrame: NSRect = .zero
+    private let width: CGFloat = 320
+    private let height: CGFloat = 66
 
     func show(success: Bool, text: String) {
         guard Thread.isMainThread else {
@@ -1616,13 +1662,54 @@ private class FeedbackToast {
             return
         }
         hideWork?.cancel()
-        panel?.orderOut(nil)
 
-        let width: CGFloat = 300
-        let height: CGFloat = 64
+        guard let screen = (NSScreen.main ?? NSScreen.screens.first) else { return }
+        let vf = screen.visibleFrame
+        restFrame = NSRect(x: vf.maxX - width - 16, y: vf.maxY - height - 10, width: width, height: height)
+        offFrame  = NSRect(x: vf.maxX + width, y: restFrame.origin.y, width: width, height: height)
 
-        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
-                        styleMask: [.borderless], backing: .buffered, defer: false)
+        let p: NSPanel
+        if let existing = panel {
+            // 复用窗口，只更新玻璃内容
+            let host = NSHostingView(rootView: ToastContentView(success: success, text: text))
+            host.frame = NSRect(x: 0, y: 0, width: width, height: height)
+            existing.contentView = host
+            p = existing
+        } else {
+            p = makePanel(frame: offFrame, success: success, text: text)
+            panel = p
+        }
+
+        // 入场：从屏幕右侧外滑入 + 淡入
+        p.alphaValue = 0
+        p.setFrame(offFrame, display: false)
+        p.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.45
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1, 0.36, 1)  // easeOutQuint
+            p.animator().alphaValue = 1
+            p.animator().setFrame(restFrame, display: true)
+        }
+
+        let work = DispatchWorkItem { [weak self] in self?.dismiss() }
+        hideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4, execute: work)
+    }
+
+    private func dismiss() {
+        guard let p = panel else { return }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.32
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.55, 0, 0.68, 0)  // easeInQuint
+            p.animator().alphaValue = 0
+            p.animator().setFrame(offFrame, display: true)
+        }, completionHandler: {
+            p.orderOut(nil)
+        })
+    }
+
+    private func makePanel(frame: NSRect, success: Bool, text: String) -> NSPanel {
+        let p = NSPanel(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
         p.isFloatingPanel = true
         p.hasShadow = true
         p.hidesOnDeactivate = false
@@ -1631,77 +1718,11 @@ private class FeedbackToast {
         p.isMovable = false
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         p.level = .floating
-        panel = p
 
-        let blur = NSVisualEffectView()
-        blur.blendingMode = .behindWindow
-        blur.material = .popover
-        blur.state = .active
-        blur.wantsLayer = true
-        blur.layer?.cornerRadius = 14
-        blur.layer?.masksToBounds = true
-        p.contentView = blur
-
-        let icon = NSTextField(labelWithString: success ? "✅" : "⚠️")
-        icon.font = .systemFont(ofSize: 22)
-        icon.translatesAutoresizingMaskIntoConstraints = false
-        blur.addSubview(icon)
-
-        let title = NSTextField(labelWithString: success ? "已复制到剪贴板" : "未能识别到文字")
-        title.font = .systemFont(ofSize: 13, weight: .semibold)
-        title.textColor = .labelColor
-        title.translatesAutoresizingMaskIntoConstraints = false
-        blur.addSubview(title)
-
-        let preview = success ? (text.count > 60 ? String(text.prefix(60)) + "…" : text) : ""
-        let body = NSTextField(labelWithString: preview)
-        body.font = .systemFont(ofSize: 11)
-        body.textColor = .secondaryLabelColor
-        body.lineBreakMode = .byTruncatingTail
-        body.maximumNumberOfLines = 1
-        body.cell?.truncatesLastVisibleLine = true
-        body.translatesAutoresizingMaskIntoConstraints = false
-        blur.addSubview(body)
-
-        NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: blur.leadingAnchor, constant: 14),
-            icon.centerYAnchor.constraint(equalTo: blur.centerYAnchor, constant: preview.isEmpty ? 0 : 6),
-            icon.widthAnchor.constraint(equalToConstant: 26),
-
-            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
-            title.trailingAnchor.constraint(equalTo: blur.trailingAnchor, constant: -14),
-            title.topAnchor.constraint(equalTo: blur.topAnchor, constant: preview.isEmpty ? 22 : 12),
-
-            body.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            body.trailingAnchor.constraint(equalTo: title.trailingAnchor),
-            body.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2),
-        ])
-
-        // 定位：主屏右上角（菜单栏下方）
-        if let screen = (NSScreen.main ?? NSScreen.screens.first) {
-            let vf = screen.visibleFrame
-            p.setFrameOrigin(NSPoint(x: vf.maxX - width - 16, y: vf.maxY - height - 8))
-        }
-
-        p.alphaValue = 0
-        p.orderFrontRegardless()
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.18
-            p.animator().alphaValue = 1
-        }
-
-        let work = DispatchWorkItem { [weak self] in
-            guard let self = self, let cur = self.panel, cur === p else { return }
-            NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.25
-                cur.animator().alphaValue = 0
-            }, completionHandler: {
-                cur.orderOut(nil)
-                if self.panel === cur { self.panel = nil }
-            })
-        }
-        hideWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2, execute: work)
+        let host = NSHostingView(rootView: ToastContentView(success: success, text: text))
+        host.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        p.contentView = host
+        return p
     }
 }
 

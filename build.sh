@@ -15,7 +15,7 @@ swiftc "$SCRIPT_DIR/src/main.swift" \
     -framework ScreenCaptureKit \
     -framework ApplicationServices \
     -o "$SCRIPT_DIR/build/ScreenshotOCR" \
-    -target arm64-apple-macosx14.0
+    -target arm64-apple-macosx26.0
 
 echo "==> Assembling .app bundle..."
 APP_DIR="$SCRIPT_DIR/build/${APP_NAME}.app"
