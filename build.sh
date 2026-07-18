@@ -24,10 +24,12 @@ mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 
 # Use cat redirect instead of cp (more reliable on macOS)
-cat "$SCRIPT_DIR/build/ScreenshotOCR" > "$APP_DIR/Contents/MacOS/ScreenshotOCR"
-cp "$SCRIPT_DIR/src/Info.plist" "$APP_DIR/Contents/Info.plist"
-cp "$SCRIPT_DIR/build/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
-echo "APPL????" > "$APP_DIR/Contents/PkgInfo"
+   cat "$SCRIPT_DIR/build/ScreenshotOCR" > "$APP_DIR/Contents/MacOS/ScreenshotOCR"
+   cp "$SCRIPT_DIR/src/Info.plist" "$APP_DIR/Contents/Info.plist"
+   # 从 assets/icon_1024.png 重新生成 icns，确保图标源与产物一致
+   bash "$SCRIPT_DIR/tools/make_iconset.sh"
+   cp "$SCRIPT_DIR/build/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+   echo "APPL????" > "$APP_DIR/Contents/PkgInfo"
 chmod +x "$APP_DIR/Contents/MacOS/ScreenshotOCR"
 
 echo "==> Code signing..."
