@@ -1,6 +1,15 @@
 import Cocoa
 import CoreGraphics
 
+// ⚠️ 已废弃：图标设计源已迁移至 assets/icon.svg（柔和拟物化 squircle）。
+//    本脚本生成的是旧版扁平风格，保留仅作历史参考，不参与构建流程。
+//    改图标请编辑 icon.svg → 渲染覆盖 icon_1024.png → ./build.sh。
+
+// ============================================================
+// 极简苹果官方风应用图标：蓝渐变 squircle + 文档卡片 + OCR 扫描光带
+// 参考：Notes / Pages / Finder 的极简视觉语言
+// ============================================================
+
 let size = 1024
 let S = CGFloat(size)
 let cs = CGColorSpaceCreateDeviceRGB()
@@ -9,102 +18,98 @@ guard let ctx = CGContext(data: nil, width: size, height: size, bitsPerComponent
                           bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { exit(1) }
 let r = CGRect(x: 0, y: 0, width: size, height: size)
 
-// macOS squircle (continuous corner superellipse approximation via layered rounded rects)
+// macOS squircle（连续圆角超椭圆近似）
 func squircle(_ rect: CGRect, radius: CGFloat) -> CGPath {
-    // 近似 superellipse：用大圆角 + 内缩描边
     return CGPath(roundedRect: rect.insetBy(dx: rect.width*0.045, dy: rect.height*0.045),
                   cornerWidth: radius, cornerHeight: radius, transform: nil)
 }
 
-// 1) 暗色底（替代阴影：macOS 26 的 setShadow 签名变更，图标本身由系统渲染阴影）
-ctx.addPath(squircle(r, radius: S*0.2237))
-ctx.setFillColor(CGColor(red: 0.06, green: 0.08, blue: 0.22, alpha: 1))
-ctx.fillPath()
-
-// 2) 主体渐变背景（深紫蓝 → 品红，科技感）
 let path = squircle(r, radius: S*0.2237)
+
+// ---------- 1) 主体：明亮蓝色渐变（苹果系统蓝） ----------
 ctx.saveGState()
 ctx.addPath(path)
 ctx.clip()
-let grad = CGGradient(colorsSpace: cs, colors: [
-    CGColor(red: 0.28, green: 0.22, blue: 0.62, alpha: 1),  // 顶 紫
-    CGColor(red: 0.16, green: 0.30, blue: 0.72, alpha: 1),  // 中 蓝
-    CGColor(red: 0.08, green: 0.14, blue: 0.40, alpha: 1),  // 底 深蓝
+let bgGrad = CGGradient(colorsSpace: cs, colors: [
+    CGColor(red: 0.24, green: 0.62, blue: 1.00, alpha: 1.0),  // 亮蓝（顶）
+    CGColor(red: 0.11, green: 0.44, blue: 0.96, alpha: 1.0),  // 中蓝
+    CGColor(red: 0.07, green: 0.30, blue: 0.88, alpha: 1.0),  // 深蓝（底）
 ] as CFArray, locations: [0, 0.55, 1])!
-ctx.drawLinearGradient(grad, start: CGPoint(x: 512, y: 1024), end: CGPoint(x: 512, y: 0), options: [])
+ctx.drawLinearGradient(bgGrad, start: CGPoint(x: 512, y: 1024), end: CGPoint(x: 512, y: 0), options: [])
 ctx.restoreGState()
 
-// 3) 顶部高光（玻璃质感）
+// ---------- 2) 极轻微顶部光泽（玻璃质感，非常克制） ----------
 ctx.saveGState()
 ctx.addPath(path)
 ctx.clip()
 let gloss = CGGradient(colorsSpace: cs, colors: [
-    CGColor(red: 1, green: 1, blue: 1, alpha: 0.25),
+    CGColor(red: 1, green: 1, blue: 1, alpha: 0.18),
     CGColor(red: 1, green: 1, blue: 1, alpha: 0.0),
 ] as CFArray, locations: [0, 0.5])!
-ctx.drawLinearGradient(gloss, start: CGPoint(x: 512, y: 1024), end: CGPoint(x: 512, y: 520), options: [])
+ctx.drawLinearGradient(gloss, start: CGPoint(x: 512, y: 1024), end: CGPoint(x: 512, y: 512), options: [])
 ctx.restoreGState()
 
-// 4) 中心：截图选框（四角L形括号）+ 文本行
-let cx: CGFloat = 512
-let boxSide: CGFloat = 460
-let boxX = cx - boxSide/2
-let boxY = (1024 - boxSide)/2
-let boxRect = CGRect(x: boxX, y: boxY, width: boxSide, height: boxSide)
-let corner: CGFloat = 110
-let thick: CGFloat = 34
-let accent = CGColor(red: 0.45, green: 0.85, blue: 1.0, alpha: 1)   // 青蓝
+// ---------- 3) 中心：白色文档卡片（代表被识别的文字区域） ----------
+let cardW: CGFloat = 480
+let cardH: CGFloat = 360
+let cardX = (S - cardW) / 2
+let cardY = (S - cardH) / 2
+let cardRect = CGRect(x: cardX, y: cardY, width: cardW, height: cardH)
+let cardPath = CGPath(roundedRect: cardRect, cornerWidth: 32, cornerHeight: 32, transform: nil)
 
-// 四角括号
-ctx.setLineWidth(thick)
-ctx.setLineCap(.round)
-ctx.setStrokeColor(accent)
-// 左上
-ctx.addLines(between: [CGPoint(x: boxX+thick/2, y: boxY+boxSide-thick/2),
-                       CGPoint(x: boxX+thick/2, y: boxY+boxSide-corner),
-                       CGPoint(x: boxX+corner, y: boxY+boxSide-thick/2)])
-ctx.strokePath()
-// 右上
-ctx.addLines(between: [CGPoint(x: boxX+boxSide-thick/2, y: boxY+boxSide-thick/2),
-                       CGPoint(x: boxX+boxSide-corner, y: boxY+boxSide-thick/2),
-                       CGPoint(x: boxX+boxSide-thick/2, y: boxY+boxSide-corner)])
-ctx.strokePath()
-// 左下
-ctx.addLines(between: [CGPoint(x: boxX+thick/2, y: boxY+thick/2),
-                       CGPoint(x: boxX+thick/2, y: boxY+corner),
-                       CGPoint(x: boxX+corner, y: boxY+thick/2)])
-ctx.strokePath()
-// 右下
-ctx.addLines(between: [CGPoint(x: boxX+boxSide-thick/2, y: boxY+thick/2),
-                       CGPoint(x: boxX+boxSide-corner, y: boxY+thick/2),
-                       CGPoint(x: boxX+boxSide-thick/2, y: boxY+corner)])
-ctx.strokePath()
+// 卡片阴影
+ctx.saveGState()
+ctx.setShadow(offset: CGSize(width: 0, height: -10), blur: 30,
+              color: CGColor(red: 0, green: 0, blue: 0, alpha: 0.28))
+ctx.addPath(cardPath)
+ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.97))
+ctx.fillPath()
+ctx.restoreGState()
 
-// 5) 文本行（代表识别出的文字）：三条横线，中间断开模拟 OCR 高亮
-let lineColor = CGColor(red: 1, green: 1, blue: 1, alpha: 0.92)
-ctx.setFillColor(lineColor)
-let linesY: [CGFloat] = [600, 512, 424]
-let lineH: CGFloat = 30
-let left = boxX + 90
-let right = boxX + boxSide - 90
-for (i, y) in linesY.enumerated() {
-    let w = i == 1 ? (right-left)*0.62 : (right-left)   // 中间线短
-    ctx.fill(CGRect(x: left, y: y, width: w, height: lineH))
+// ---------- 4) 卡片上的文字行（三行，代表识别出的文字） ----------
+ctx.setFillColor(CGColor(red: 0.32, green: 0.40, blue: 0.55, alpha: 1.0))  // 深蓝灰
+let textLeft = cardX + 56
+let textRight = cardX + cardW - 56
+let textW = textRight - textLeft
+let rowH: CGFloat = 28
+let rows: [(y: CGFloat, w: CGFloat)] = [
+    (cardY + cardH - 92, textW * 0.95),
+    (cardY + cardH - 150, textW * 0.68),
+    (cardY + cardH - 208, textW * 0.85),
+]
+for row in rows {
+    ctx.fill(CGRect(x: textLeft, y: row.y, width: row.w, height: rowH))
 }
 
-// 中间线上叠加高亮扫描条（青色半透明，代表正在识别）
-ctx.setFillColor(CGColor(red: 0.45, green: 0.85, blue: 1.0, alpha: 0.35))
-ctx.fill(CGRect(x: left, y: 512-6, width: (right-left), height: lineH+12))
+// ---------- 5) OCR 扫描光带（贯穿卡片，代表文字识别） ----------
+ctx.saveGState()
+ctx.addPath(cardPath)
+ctx.clip()
+// 主光带
+let beamY: CGFloat = cardY + cardH - 270
+let beamGrad = CGGradient(colorsSpace: cs, colors: [
+    CGColor(red: 0.10, green: 0.45, blue: 1.0, alpha: 0.0),
+    CGColor(red: 0.10, green: 0.55, blue: 1.0, alpha: 1.0),
+    CGColor(red: 0.10, green: 0.45, blue: 1.0, alpha: 0.0),
+] as CFArray, locations: [0, 0.5, 1])!
+ctx.drawLinearGradient(beamGrad, start: CGPoint(x: cardX, y: beamY), end: CGPoint(x: cardX + cardW, y: beamY), options: [])
+// 光带高光细线
+ctx.setFillColor(CGColor(red: 0.5, green: 0.8, blue: 1.0, alpha: 0.9))
+ctx.fill(CGRect(x: cardX, y: beamY - 2, width: cardW, height: 4))
+ctx.restoreGState()
 
-// 6) 外圈细描边（玻璃边缘）
+// ---------- 6) 外圈细描边（玻璃边缘） ----------
 ctx.addPath(path)
 ctx.setLineWidth(3)
-ctx.setStrokeColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.18))
+ctx.setStrokeColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.16))
 ctx.strokePath()
 
+// ---------- 输出 ----------
+let outDir = "/Users/jznano/Desktop/开发/截图复制/build/icon_assets"
+try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
 guard let img = ctx.makeImage() else { exit(2) }
-let url = URL(fileURLWithPath: "/Users/jznano/Desktop/开发/截图复制/build/icon_assets/icon_1024.png")
+let url = URL(fileURLWithPath: outDir + "/icon_1024.png")
 let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil)!
 CGImageDestinationAddImage(dest, img, nil)
 CGImageDestinationFinalize(dest)
-print("icon_1024.png written")
+print("✓ icon_1024.png written (minimal Apple style: blue squircle + document + scan beam)")
