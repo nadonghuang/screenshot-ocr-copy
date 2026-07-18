@@ -3,7 +3,7 @@ import CoreGraphics
 
 // ============================================================
 // README 横幅：直接加载真实应用图标 assets/icon_1024.png
-// 保证横幅与图标永远同步
+// 改用 NSImage 加载（PNG 兼容性更好），确保图标正确绘制
 // ============================================================
 
 let W = 1280
@@ -26,12 +26,16 @@ let bgGrad = CGGradient(colorsSpace: cs, colors: [
 ] as CFArray, locations: [0, 1])!
 ctx.drawLinearGradient(bgGrad, start: CGPoint(x: 0, y: H), end: CGPoint(x: W, y: 0), options: [])
 
-// ---------- 2) 加载真实图标 ----------
+// ---------- 2) 用 NSImage 加载真实图标（更可靠） ----------
 let iconFilePath = "/Users/jznano/Desktop/开发/截图复制/assets/icon_1024.png"
-guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: iconFilePath) as CFURL, nil),
-      let iconImage = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
-    fatalError("❌ 无法加载 \(iconFilePath)，请先生成图标")
+guard let nsImage = NSImage(contentsOfFile: iconFilePath) else {
+    fatalError("❌ NSImage 无法加载 \(iconFilePath)")
 }
+// 锁定焦点获取 CGImage
+guard let iconImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+    fatalError("❌ 无法从 NSImage 获取 CGImage")
+}
+print("✓ 图标加载成功: \(iconImage.width)x\(iconImage.height)")
 
 // ---------- 3) 左侧：绘制真实图标（带 squircle 裁剪 + 阴影） ----------
 let iconSize: CGFloat = 220
@@ -53,8 +57,17 @@ ctx.restoreGState()
 ctx.saveGState()
 ctx.addPath(iconPath)
 ctx.clip()
-ctx.draw(iconImage, in: iconRect)
+// 使用 NSImage 的 draw 方法（更可靠），但需要先翻转坐标系
+// 因为 NSImage 默认使用左上角原点，而 CGContext 使用左下角原点
+ctx.saveGState()
+// 翻转 Y 轴以匹配 NSImage 绘制
+ctx.translateBy(x: 0, y: iconRect.maxY + iconRect.minY)
+ctx.scaleBy(x: 1, y: -1)
+ctx.draw(iconImage, in: CGRect(x: iconRect.origin.x, y: 0, width: iconRect.width, height: iconRect.height))
 ctx.restoreGState()
+ctx.restoreGState()
+
+print("✓ 图标绘制完成")
 
 // ---------- 4) 右侧文字 ----------
 func drawText(_ text: String, font: CTFont, color: CGColor, at point: CGPoint) {
@@ -92,4 +105,4 @@ let url = URL(fileURLWithPath: outDir + "/banner.png")
 let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil)!
 CGImageDestinationAddImage(dest, img, nil)
 CGImageDestinationFinalize(dest)
-print("✓ banner.png 已生成（直接使用真实图标，1280x320）")
+print("✓ banner.png 已生成（使用 NSImage 加载图标，1280x320）")
