@@ -8,9 +8,9 @@
 
 [简体中文](README.zh.md) | **English** | [日本語](README.ja.md)
 
-A lightweight macOS menu-bar screenshot OCR tool. Select any screen area, auto-recognize Chinese/English text, and copy to clipboard.
+**Copy any text from your screen in one shortcut.** A lightweight, **offline** macOS menu-bar app for **text extraction** — screenshot → **Apple Vision OCR** → clipboard. **Free, open source, no API key, no cloud, zero dependencies.** A native **Snipaste alternative** for OCR.
 
-Pure native implementation, zero third-party dependencies, built on Apple Vision + ScreenCaptureKit.
+Built on Apple Vision + ScreenCaptureKit + AppKit. Pure Swift single file.
 
 </div>
 
