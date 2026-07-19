@@ -8,9 +8,9 @@
 
 [简体中文](README.zh.md) | [English](README.md) | [日本語](README.ja.md)
 
-一个轻量的 macOS 菜单栏截图 OCR 工具。框选屏幕任意区域，自动识别中英文文字并复制到剪贴板。
+**一个快捷键，屏幕上的文字秒进剪贴板。** 轻量级、**完全离线** 的 macOS 菜单栏 **文字识别** 工具——截图 → **Apple Vision OCR** → 复制。**免费开源、无需 API Key、不上云、零第三方依赖。** 可视为 **Snipaste 的 OCR 原生替代方案**。
 
-纯原生实现，零第三方依赖，基于 Apple Vision + ScreenCaptureKit。
+基于 Apple Vision + ScreenCaptureKit + AppKit，纯 Swift 单文件实现。
 
 </div>
 

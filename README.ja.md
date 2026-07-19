@@ -8,9 +8,9 @@
 
 [简体中文](README.zh.md) | [English](README.md) | **日本語**
 
-macOS メニューバー常駐型の軽量スクリーンショット OCR ツール。画面の任意の領域を選択し、中国語/英語テキストを自動認識してクリップボードにコピーします。
+**ショートカット一つで画面のテキストをコピー。** 軽量・**完全オフライン** の macOS メニューバー **文字認識** ツール — スクリーンショット → **Apple Vision OCR** → クリップボード。**無料・オープンソース・APIキー不要・クラウド不要・依存関係ゼロ。** **Snipaste の OCR ネイティブ代替**。
 
-完全ネイティブ実装、サードパーティ依存ゼロ、Apple Vision + ScreenCaptureKit ベース。
+Apple Vision + ScreenCaptureKit + AppKit 基盤、純 Swift 単一ファイル。
 
 </div>
 
